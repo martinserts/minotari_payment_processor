@@ -1,0 +1,33 @@
+[package]
+name = "minotari_payment_processor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.99"
+axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
+chrono = "0.4.42"
+clap = { version = "4.5.47", features = ["derive"] }
+tokio = { version = "1.47.1", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { version = "0.8.6", features = [
+    "migrate",
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "chrono",
+] }
+thiserror = "2.0.17"
+utoipa = { version = "5.4.0", features = ["chrono"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+minotari-client = { path = "../minotari-client" }
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3.23.0"
+
+minotari_node_wallet_client = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
+tari_transaction_components = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
+tari_utilities = { version = "0.8" }
+hex = "0.4.3"
+dotenv = "0.15.0"
+url = "2.5.7"
