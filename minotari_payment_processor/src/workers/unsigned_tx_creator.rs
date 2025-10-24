@@ -35,12 +35,12 @@ async fn process_unsigned_transactions(
             .map(|p| RecipientRequest {
                 address: p.recipient_address,
                 amount: p.amount,
+                payment_id: p.payment_id.map(Some),
             })
             .collect();
 
         let request_body = CreateTransactionRequest {
             idempotency_key: Some(Some(batch.pr_idempotency_key)),
-            payment_id: None, // TODO: we need to move "payment_id" to each recipient
             recipients,
             seconds_to_lock_utxos: None, // Use default lock timeout
         };

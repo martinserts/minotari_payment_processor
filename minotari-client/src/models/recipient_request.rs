@@ -17,10 +17,21 @@ pub struct RecipientRequest {
     pub address: String,
     #[serde(rename = "amount")]
     pub amount: i64,
+    #[serde(
+        rename = "payment_id",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payment_id: Option<Option<String>>,
 }
 
 impl RecipientRequest {
     pub fn new(address: String, amount: i64) -> RecipientRequest {
-        RecipientRequest { address, amount }
+        RecipientRequest {
+            address,
+            amount,
+            payment_id: None,
+        }
     }
 }

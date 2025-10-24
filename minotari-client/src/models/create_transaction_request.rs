@@ -20,13 +20,6 @@ pub struct CreateTransactionRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub idempotency_key: Option<Option<String>>,
-    #[serde(
-        rename = "payment_id",
-        default,
-        with = "::serde_with::rust::double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub payment_id: Option<Option<String>>,
     #[serde(rename = "recipients")]
     pub recipients: Vec<models::RecipientRequest>,
     #[serde(
@@ -42,7 +35,6 @@ impl CreateTransactionRequest {
     pub fn new(recipients: Vec<models::RecipientRequest>) -> CreateTransactionRequest {
         CreateTransactionRequest {
             idempotency_key: None,
-            payment_id: None,
             recipients,
             seconds_to_lock_utxos: None,
         }
