@@ -22,6 +22,7 @@ pub struct PaymentRequest {
     pub account_name: String,
     pub recipient_address: String,
     pub amount: i64,
+    pub payment_id: Option<String>, // Payment Memo
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -111,7 +112,7 @@ pub async fn api_create_payment(
         &request.account_name,
         &request.recipient_address,
         request.amount,
-        None, // payment_id is generated internally
+        request.payment_id,
     )
     .await?;
 
