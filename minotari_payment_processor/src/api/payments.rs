@@ -18,7 +18,7 @@ use crate::{
 };
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct PaymentRequest {
-    pub client_id: String,
+    pub client_id: String, // Idempotency key
     pub account_name: String,
     pub recipient_address: String,
     pub amount: i64,
