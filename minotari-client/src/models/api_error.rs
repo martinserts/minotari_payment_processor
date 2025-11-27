@@ -18,6 +18,7 @@ pub enum ApiError {
     ApiErrorOneOf1(Box<models::ApiErrorOneOf1>),
     ApiErrorOneOf2(Box<models::ApiErrorOneOf2>),
     ApiErrorOneOf3(Box<models::ApiErrorOneOf3>),
+    ApiErrorOneOf4(Box<models::ApiErrorOneOf4>),
 }
 
 impl Default for ApiError {

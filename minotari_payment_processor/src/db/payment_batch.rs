@@ -193,6 +193,7 @@ impl PaymentBatch {
                 updated_at as "updated_at: DateTime<Utc>"
             FROM payment_batches
             WHERE status = ?
+            ORDER BY created_at
             "#,
             status
         )

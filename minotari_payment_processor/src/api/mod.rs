@@ -7,6 +7,8 @@ use sqlx::SqlitePool;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::config::PaymentProcessorEnv;
+
 mod error;
 mod payments;
 mod version;
@@ -14,6 +16,7 @@ mod version;
 #[derive(Clone)]
 pub struct AppState {
     pub db_pool: SqlitePool,
+    pub env: PaymentProcessorEnv,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -42,8 +45,8 @@ impl FromRef<AppState> for SqlitePool {
 )]
 pub struct ApiDoc;
 
-pub fn create_router(db_pool: SqlitePool) -> Router {
-    let app_state = AppState { db_pool };
+pub fn create_router(db_pool: SqlitePool, env: PaymentProcessorEnv) -> Router {
+    let app_state = AppState { db_pool, env };
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
