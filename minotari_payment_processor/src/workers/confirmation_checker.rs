@@ -11,26 +11,29 @@ use crate::db::payment::Payment;
 use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
 
 const DEFAULT_SLEEP_SECS: u64 = 60;
-const REQUIRED_CONFIRMATIONS: u64 = 10;
 
-pub async fn run(db_pool: SqlitePool, base_node_client: Client, sleep_secs: Option<u64>) {
+pub async fn run(db_pool: SqlitePool, base_node_client: Client, sleep_secs: Option<u64>, required_confirmations: u64) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
     println!(
         "Confirmation Checker worker started. Polling every {} seconds. Required Confirmations: {}",
-        sleep_secs, REQUIRED_CONFIRMATIONS
+        sleep_secs, required_confirmations
     );
 
     let mut interval = time::interval(Duration::from_secs(sleep_secs));
 
     loop {
         interval.tick().await;
-        if let Err(e) = check_transaction_confirmations(&db_pool, &base_node_client).await {
+        if let Err(e) = check_transaction_confirmations(&db_pool, &base_node_client, required_confirmations).await {
             eprintln!("Confirmation Checker worker error: {:?}", e);
         }
     }
 }
 
-async fn check_transaction_confirmations(db_pool: &SqlitePool, base_node_client: &Client) -> Result<(), anyhow::Error> {
+async fn check_transaction_confirmations(
+    db_pool: &SqlitePool,
+    base_node_client: &Client,
+    required_confirmations: u64,
+) -> Result<(), anyhow::Error> {
     let mut conn = db_pool.acquire().await?;
 
     let batches = PaymentBatch::find_by_status(&mut conn, PaymentBatchStatus::AwaitingConfirmation).await?;
@@ -40,7 +43,7 @@ async fn check_transaction_confirmations(db_pool: &SqlitePool, base_node_client:
     }
 
     for batch in batches {
-        if let Err(e) = process_single_batch(db_pool, base_node_client, &batch).await {
+        if let Err(e) = process_single_batch(db_pool, base_node_client, &batch, required_confirmations).await {
             let error_message = e.to_string();
             eprintln!(
                 "Error checking confirmation for batch {}: {}. Incrementing retry count.",
@@ -63,6 +66,7 @@ async fn process_single_batch(
     db_pool: &SqlitePool,
     base_node_client: &Client,
     batch: &PaymentBatch,
+    required_confirmations: u64,
 ) -> Result<(), anyhow::Error> {
     let batch_id = &batch.id;
 
@@ -103,7 +107,14 @@ async fn process_single_batch(
                 "INFO: Batch {}: Location 'Mined'. Processing confirmations...",
                 batch_id
             );
-            handle_mined_transaction(db_pool, base_node_client, batch_id, &tx_query_response).await?
+            handle_mined_transaction(
+                db_pool,
+                base_node_client,
+                batch_id,
+                &tx_query_response,
+                required_confirmations,
+            )
+            .await?
         },
         TxLocation::InMempool => {
             println!("INFO: Batch {} is currently in the mempool, awaiting mining.", batch_id);
@@ -128,6 +139,7 @@ async fn handle_mined_transaction(
     base_node_client: &Client,
     batch_id: &str,
     tx_query_response: &tari_transaction_components::rpc::models::TxQueryResponse,
+    required_confirmations: u64,
 ) -> Result<(), anyhow::Error> {
     let mined_height = tx_query_response
         .mined_height
@@ -147,10 +159,10 @@ async fn handle_mined_transaction(
 
     println!(
         "INFO: Batch {}: Mined Height: {}, Tip Height: {}, Confirmations: {}/{}",
-        batch_id, mined_height, best_block_height, confirmations, REQUIRED_CONFIRMATIONS
+        batch_id, mined_height, best_block_height, confirmations, required_confirmations
     );
 
-    if confirmations >= REQUIRED_CONFIRMATIONS {
+    if confirmations >= required_confirmations {
         println!(
             "INFO: Batch {}: Confirmation threshold reached. Finalizing...",
             batch_id
@@ -192,7 +204,7 @@ async fn handle_mined_transaction(
     } else {
         println!(
             "INFO: Batch {} awaiting more confirmations. (Current: {}, Required: {})",
-            batch_id, confirmations, REQUIRED_CONFIRMATIONS
+            batch_id, confirmations, required_confirmations
         );
     }
 

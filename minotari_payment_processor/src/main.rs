@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         db_pool.clone(),
         base_node_client.clone(),
         env.confirmation_checker_sleep_secs,
+        env.confirmation_checker_required_confirmations.unwrap_or(10),
     ));
     println!("Minotari Payment Processor started. Press Ctrl+C to shut down.");
 

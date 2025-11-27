@@ -38,6 +38,7 @@ pub struct PaymentProcessorEnv {
     pub transaction_signer_sleep_secs: Option<u64>,
     pub broadcaster_sleep_secs: Option<u64>,
     pub confirmation_checker_sleep_secs: Option<u64>,
+    pub confirmation_checker_required_confirmations: Option<u64>,
     pub accounts: HashMap<String, PaymentReceiverAccount>,
 }
 
@@ -67,6 +68,7 @@ struct RawSettings {
     transaction_signer_sleep_secs: Option<u64>,
     broadcaster_sleep_secs: Option<u64>,
     confirmation_checker_sleep_secs: Option<u64>,
+    confirmation_checker_required_confirmations: Option<u64>,
     #[serde(default)]
     accounts: HashMap<String, RawAccount>,
 }
@@ -147,6 +149,7 @@ impl TryFrom<RawSettings> for PaymentProcessorEnv {
             transaction_signer_sleep_secs: raw.transaction_signer_sleep_secs,
             broadcaster_sleep_secs: raw.broadcaster_sleep_secs,
             confirmation_checker_sleep_secs: raw.confirmation_checker_sleep_secs,
+            confirmation_checker_required_confirmations: raw.confirmation_checker_required_confirmations,
             accounts,
         })
     }

@@ -70,6 +70,8 @@ Because the application uses structured configuration, hierarchical settings (li
     *   Example: `LISTEN_IP="0.0.0.0"`
 *   **`LISTEN_PORT`** (Optional): The port the HTTP API server will listen on. Defaults to `9145`.
     *   Example: `LISTEN_PORT="9145"`
+*   **`CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS`** (Optional): The number of confirmations required before a transaction is considered final. Defaults to `10`.
+    *   Example: `CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS="10"`
 
 ### Account Configuration
 
