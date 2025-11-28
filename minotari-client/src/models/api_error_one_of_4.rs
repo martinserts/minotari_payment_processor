@@ -12,13 +12,15 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ApiErrorOneOf3 {
-    #[serde(rename = "FailedToLockFunds")]
-    pub failed_to_lock_funds: String,
+pub struct ApiErrorOneOf4 {
+    #[serde(rename = "FailedCreateUnsignedTx")]
+    pub failed_create_unsigned_tx: String,
 }
 
-impl ApiErrorOneOf3 {
-    pub fn new(failed_to_lock_funds: String) -> ApiErrorOneOf3 {
-        ApiErrorOneOf3 { failed_to_lock_funds }
+impl ApiErrorOneOf4 {
+    pub fn new(failed_create_unsigned_tx: String) -> ApiErrorOneOf4 {
+        ApiErrorOneOf4 {
+            failed_create_unsigned_tx,
+        }
     }
 }

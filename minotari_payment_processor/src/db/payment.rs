@@ -375,7 +375,7 @@ struct PaymentWithBatch {
     updated_at: DateTime<Utc>,
     batch_id: Option<String>,
     batch_account_name: Option<String>,
-    batch_status: Option<String>, // This will be converted to PaymentBatchStatus later
+    batch_status: Option<String>,
     batch_pr_idempotency_key: Option<String>,
     batch_unsigned_tx_json: Option<String>,
     batch_signed_tx_json: Option<String>,

@@ -1,97 +1,211 @@
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use minotari_node_wallet_client::{BaseNodeWalletClient, http::Client};
-use sqlx::{Acquire, SqlitePool};
-use tari_transaction_components::offline_signing::models::{SignedOneSidedTransactionResult, TransactionResult};
+use sqlx::SqlitePool;
+use tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult;
+use tari_transaction_components::offline_signing::models::TransactionResult;
 use tari_transaction_components::rpc::models::TxLocation;
 use tari_utilities::byte_array::ByteArray;
 use tokio::time::{self, Duration};
 
-use crate::db::payment_batch::PaymentBatchStatus;
-use crate::db::{payment::Payment, payment_batch::PaymentBatch};
+use crate::db::payment::Payment;
+use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
 
 const DEFAULT_SLEEP_SECS: u64 = 60;
-const REQUIRED_CONFIRMATIONS: u64 = 10;
 
-pub async fn run(db_pool: SqlitePool, base_node_client: Client, sleep_secs: Option<u64>) {
+pub async fn run(db_pool: SqlitePool, base_node_client: Client, sleep_secs: Option<u64>, required_confirmations: u64) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
+    println!(
+        "Confirmation Checker worker started. Polling every {} seconds. Required Confirmations: {}",
+        sleep_secs, required_confirmations
+    );
+
     let mut interval = time::interval(Duration::from_secs(sleep_secs));
+
     loop {
         interval.tick().await;
-        if let Err(e) = check_transaction_confirmations(&db_pool, &base_node_client).await {
+        if let Err(e) = check_transaction_confirmations(&db_pool, &base_node_client, required_confirmations).await {
             eprintln!("Confirmation Checker worker error: {:?}", e);
         }
     }
 }
 
-async fn check_transaction_confirmations(db_pool: &SqlitePool, base_node_client: &Client) -> Result<(), anyhow::Error> {
+async fn check_transaction_confirmations(
+    db_pool: &SqlitePool,
+    base_node_client: &Client,
+    required_confirmations: u64,
+) -> Result<(), anyhow::Error> {
     let mut conn = db_pool.acquire().await?;
+
     let batches = PaymentBatch::find_by_status(&mut conn, PaymentBatchStatus::AwaitingConfirmation).await?;
 
+    if !batches.is_empty() {
+        println!("INFO: Found {} batches awaiting confirmation.", batches.len());
+    }
+
     for batch in batches {
-        let batch_id = batch.id.clone();
+        if let Err(e) = process_single_batch(db_pool, base_node_client, &batch, required_confirmations).await {
+            let error_message = e.to_string();
+            eprintln!(
+                "Error checking confirmation for batch {}: {}. Incrementing retry count.",
+                batch.id, error_message
+            );
 
-        let signed_tx_json = batch
-            .signed_tx_json
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Batch {} has no signed_tx_json", batch_id))?;
-        let signed_tx = SignedOneSidedTransactionResult::from_json(&signed_tx_json)?;
-        let sig = &signed_tx.signed_transaction.transaction.body.kernels()[0].excess_sig;
-        let excess_sig_nonce = sig.get_compressed_public_nonce().to_vec();
-        let excess_sig_sig = sig.get_signature().to_vec();
-        let tx_query_response = base_node_client
-            .transaction_query(excess_sig_nonce, excess_sig_sig)
-            .await?;
-
-        match tx_query_response.location {
-            TxLocation::Mined => {
-                let mined_height = tx_query_response
-                    .mined_height
-                    .ok_or_else(|| anyhow!("Mined transaction has no mined_height"))?;
-
-                let tip_info = base_node_client.get_tip_info().await?;
-                let best_block_height = tip_info
-                    .metadata
-                    .ok_or_else(|| anyhow!("Tip info has no metadata"))?
-                    .best_block_height();
-
-                let confirmations = best_block_height.saturating_sub(mined_height) + 1;
-
-                if confirmations >= REQUIRED_CONFIRMATIONS {
-                    let mined_header_hash = tx_query_response
-                        .mined_header_hash
-                        .ok_or_else(|| anyhow!("Mined transaction has no mined_header_hash"))?;
-                    let mined_timestamp = tx_query_response
-                        .mined_timestamp
-                        .ok_or_else(|| anyhow!("Mined transaction has no mined_timestamp"))?;
-
-                    let mut tx = conn.begin().await?;
-                    PaymentBatch::update_to_confirmed(
-                        &mut tx,
-                        &batch_id,
-                        mined_height,
-                        mined_header_hash,
-                        mined_timestamp,
-                    )
-                    .await?;
-                    let associated_payments = Payment::find_by_batch_id(&mut tx, &batch_id).await?;
-                    let payment_ids: Vec<String> = associated_payments.iter().map(|p| p.id.clone()).collect();
-                    Payment::update_payments_to_confirmed(&mut tx, &payment_ids).await?;
-                    tx.commit().await?;
-                    println!("Batch {} confirmed successfully.", batch_id);
-                } else {
-                    println!(
-                        "Batch {} awaiting more confirmations ({} received).",
-                        batch_id, confirmations
-                    );
-                }
-            },
-            TxLocation::InMempool => {
-                println!("Batch {} is in mempool, awaiting mining.", batch_id);
-            },
-            TxLocation::None | TxLocation::NotStored => {
-                eprintln!("Batch {} transaction not found on base node or mempool.", batch_id);
-            },
+            if let Err(db_err) = PaymentBatch::increment_retry_count(&mut conn, &batch.id, &error_message).await {
+                eprintln!(
+                    "CRITICAL: Failed to update retry count for batch {}: {:?}",
+                    batch.id, db_err
+                );
+            }
         }
+    }
+
+    Ok(())
+}
+
+async fn process_single_batch(
+    db_pool: &SqlitePool,
+    base_node_client: &Client,
+    batch: &PaymentBatch,
+    required_confirmations: u64,
+) -> Result<(), anyhow::Error> {
+    let batch_id = &batch.id;
+
+    println!("INFO: Checking status for Batch ID: {}", batch_id);
+
+    let signed_tx_json = batch
+        .signed_tx_json
+        .clone()
+        .ok_or_else(|| anyhow!("Batch {} has no signed_tx_json", batch_id))?;
+
+    let signed_tx = SignedOneSidedTransactionResult::from_json(&signed_tx_json)?;
+
+    let kernel = signed_tx
+        .signed_transaction
+        .transaction
+        .body
+        .kernels()
+        .first()
+        .ok_or_else(|| anyhow!("Transaction has no kernels"))?;
+
+    let excess_sig_nonce = kernel.excess_sig.get_compressed_public_nonce().to_vec();
+    let excess_sig_sig = kernel.excess_sig.get_signature().to_vec();
+
+    println!(
+        "DEBUG: Batch {}: Querying Base Node for Kernel Signature (Nonce start: {:?})",
+        batch_id,
+        &excess_sig_nonce[0..4]
+    );
+
+    let tx_query_response = base_node_client
+        .transaction_query(excess_sig_nonce, excess_sig_sig)
+        .await
+        .context("Failed to query transaction from Base Node")?;
+
+    match tx_query_response.location {
+        TxLocation::Mined => {
+            println!(
+                "INFO: Batch {}: Location 'Mined'. Processing confirmations...",
+                batch_id
+            );
+            handle_mined_transaction(
+                db_pool,
+                base_node_client,
+                batch_id,
+                &tx_query_response,
+                required_confirmations,
+            )
+            .await?
+        },
+        TxLocation::InMempool => {
+            println!("INFO: Batch {} is currently in the mempool, awaiting mining.", batch_id);
+        },
+        TxLocation::None | TxLocation::NotStored => {
+            println!(
+                "WARN: Batch {} location returned as '{:?}'.",
+                batch_id, tx_query_response.location
+            );
+            return Err(anyhow!(
+                "Transaction not found on Base Node (Location: {:?}). It may have been dropped or reorged.",
+                tx_query_response.location
+            ));
+        },
+    }
+
+    Ok(())
+}
+
+async fn handle_mined_transaction(
+    db_pool: &SqlitePool,
+    base_node_client: &Client,
+    batch_id: &str,
+    tx_query_response: &tari_transaction_components::rpc::models::TxQueryResponse,
+    required_confirmations: u64,
+) -> Result<(), anyhow::Error> {
+    let mined_height = tx_query_response
+        .mined_height
+        .ok_or_else(|| anyhow!("Mined transaction missing mined_height"))?;
+
+    let tip_info = base_node_client
+        .get_tip_info()
+        .await
+        .context("Failed to get tip info from Base Node")?;
+
+    let best_block_height = tip_info
+        .metadata
+        .ok_or_else(|| anyhow!("Tip info missing metadata"))?
+        .best_block_height();
+
+    let confirmations = best_block_height.saturating_sub(mined_height) + 1;
+
+    println!(
+        "INFO: Batch {}: Mined Height: {}, Tip Height: {}, Confirmations: {}/{}",
+        batch_id, mined_height, best_block_height, confirmations, required_confirmations
+    );
+
+    if confirmations >= required_confirmations {
+        println!(
+            "INFO: Batch {}: Confirmation threshold reached. Finalizing...",
+            batch_id
+        );
+
+        let mined_header_hash = tx_query_response
+            .mined_header_hash
+            .clone()
+            .ok_or_else(|| anyhow!("Mined transaction missing mined_header_hash"))?;
+        let mined_timestamp = tx_query_response
+            .mined_timestamp
+            .ok_or_else(|| anyhow!("Mined transaction missing mined_timestamp"))?;
+
+        let mut tx = db_pool.begin().await.context("Failed to begin DB transaction")?;
+
+        PaymentBatch::update_to_confirmed(&mut tx, batch_id, mined_height, mined_header_hash, mined_timestamp)
+            .await
+            .context("Failed to update batch to Confirmed")?;
+
+        let associated_payments = Payment::find_by_batch_id(&mut tx, batch_id)
+            .await
+            .context("Failed to fetch associated payments")?;
+
+        println!(
+            "INFO: Batch {}: Marking {} associated payments as confirmed.",
+            batch_id,
+            associated_payments.len()
+        );
+
+        let payment_ids: Vec<String> = associated_payments.iter().map(|p| p.id.clone()).collect();
+
+        Payment::update_payments_to_confirmed(&mut tx, &payment_ids)
+            .await
+            .context("Failed to update payments to Confirmed")?;
+
+        tx.commit().await.context("Failed to commit DB transaction")?;
+
+        println!("INFO: Batch {} confirmed successfully and DB updated.", batch_id);
+    } else {
+        println!(
+            "INFO: Batch {} awaiting more confirmations. (Current: {}, Required: {})",
+            batch_id, confirmations, required_confirmations
+        );
     }
 
     Ok(())

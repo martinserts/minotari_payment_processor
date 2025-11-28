@@ -46,32 +46,53 @@ make db-dump
 
 ## Configuration
 
-The `minotari_payment_processor` is configured using environment variables. These variables can be set in a `.env` file in the project root or directly in your environment.
+The `minotari_payment_processor` is configured using environment variables. These variables can be set in a `.env` file in the project root or directly in your system environment.
 
-Below is a list of key environment variables:
+Because the application uses structured configuration, hierarchical settings (like accounts) use double underscores (`__`) as separators.
+
+### Core Settings
 
 *   **`DATABASE_URL`** (Mandatory): The URL for the SQLite database.
     *   Example: `DATABASE_URL="sqlite://data/payments.db"`
+*   **`TARI_NETWORK`** (Optional): The Tari network to run on. Defaults to `MainNet`.
+    *   Options: `MainNet`, `Esmeralda`, `NextNet`, `Igor`.
+    *   Example: `TARI_NETWORK="Esmeralda"`
 *   **`PAYMENT_RECEIVER`** (Mandatory): The URL of the Payment Receiver (PR) API.
     *   Example: `PAYMENT_RECEIVER="http://localhost:9000"`
 *   **`BASE_NODE`** (Mandatory): The URL of the Tari Base Node.
     *   Example: `BASE_NODE="https://rpc.esmeralda.tari.com"`
 *   **`CONSOLE_WALLET_PATH`** (Mandatory): The path to the `minotari_console_wallet` executable, used for signing transactions.
-    *   Example: `CONSOLE_WALLET_PATH="minotari_console_wallet"`
+*   **`CONSOLE_WALLET_BASE_PATH`** (Mandatory): Wallet base path (--base-path).
+    *   Example: `CONSOLE_WALLET_PATH="/usr/local/bin/minotari_console_wallet"`
+*   **`CONSOLE_WALLET_PASSWORD`** (Mandatory): The password for the console wallet.
+    *   Example: `CONSOLE_WALLET_PASSWORD="my_secure_password"`
 *   **`LISTEN_IP`** (Optional): The IP address the HTTP API server will listen on. Defaults to `0.0.0.0`.
     *   Example: `LISTEN_IP="0.0.0.0"`
 *   **`LISTEN_PORT`** (Optional): The port the HTTP API server will listen on. Defaults to `9145`.
     *   Example: `LISTEN_PORT="9145"`
-*   **`BATCH_CREATOR_SLEEP_SECS`** (Optional): The sleep duration in seconds for the Batch Creator worker.
-    *   Example: `BATCH_CREATOR_SLEEP_SECS="600"` (10 minutes)
-*   **`UNSIGNED_TX_CREATOR_SLEEP_SECS`** (Optional): The sleep duration in seconds for the Unsigned Transaction Creator worker.
-    *   Example: `UNSIGNED_TX_CREATOR_SLEEP_SECS="15"`
-*   **`TRANSACTION_SIGNER_SLEEP_SECS`** (Optional): The sleep duration in seconds for the Transaction Signer worker.
-    *   Example: `TRANSACTION_SIGNER_SLEEP_SECS="10"`
-*   **`BROADCASTER_SLEEP_SECS`** (Optional): The sleep duration in seconds for the Broadcaster worker.
-    *   Example: `BROADCASTER_SLEEP_SECS="15"`
-*   **`CONFIRMATION_CHECKER_SLEEP_SECS`** (Optional): The sleep duration in seconds for the Confirmation Checker worker.
-    *   Example: `CONFIRMATION_CHECKER_SLEEP_SECS="60"`
+*   **`CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS`** (Optional): The number of confirmations required before a transaction is considered final. Defaults to `10`.
+    *   Example: `CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS="10"`
+
+### Account Configuration
+
+The application supports configuring multiple payment receiver accounts. Because the number of accounts is dynamic, the configuration uses a specific pattern with double underscores (`__`) to map environment variables to specific accounts.
+
+The format is: `ACCOUNTS__<UNIQUE_IDENTIFIER>__<FIELD>`
+
+Each account requires three fields: `NAME`, `VIEW_KEY` (Hex), and `PUBLIC_SPEND_KEY` (Hex).
+
+**Example configuration for two accounts ("Primary" and "Backup"):**
+
+```bash
+# Account 1: Identifier 'default'
+ACCOUNTS__DEFAULT__NAME="default"
+ACCOUNTS__DEFAULT__VIEW_KEY="a1b2c3d4..." 
+ACCOUNTS__DEFAULT__PUBLIC_SPEND_KEY="e5f6g7h8..."
+
+# Account 2: Identifier 'backup'
+ACCOUNTS__BACKUP__NAME="backup"
+ACCOUNTS__BACKUP__VIEW_KEY="11223344..."
+ACCOUNTS__BACKUP__PUBLIC_SPEND_KEY="55667788..."
 
 ## HTTP API
 

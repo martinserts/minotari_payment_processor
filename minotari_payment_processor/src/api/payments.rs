@@ -10,18 +10,20 @@ use sqlx::SqlitePool;
 use utoipa::ToSchema;
 
 use crate::{
-    api::error::ApiError,
+    api::{AppState, error::ApiError},
     db::{
         payment::{Payment, PaymentStatus},
         payment_batch::PaymentBatch,
     },
 };
+
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct PaymentRequest {
-    pub client_id: String,
+    pub client_id: String, // Idempotency key
     pub account_name: String,
     pub recipient_address: String,
     pub amount: i64,
+    pub payment_id: Option<String>, // Payment Memo
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -82,27 +84,32 @@ impl From<Payment> for PaymentResponse {
     responses(
         (status = 202, description = "Payment request accepted for processing", body = PaymentResponse),
         (status = 200, description = "Payment request already exists (idempotent)", body = PaymentResponse),
-        (status = 400, description = "Bad request", body = ApiError),
+        (status = 400, description = "Bad request (Invalid amount or Account not found)", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError)
     )
 )]
 pub async fn api_create_payment(
-    State(db_pool): State<SqlitePool>,
+    State(state): State<AppState>,
     Json(request): Json<PaymentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut transaction = db_pool.begin().await?;
+    if !state.env.accounts.contains_key(&request.account_name.to_lowercase()) {
+        return Err(ApiError::BadRequest(format!(
+            "Account '{}' not found in configuration",
+            request.account_name
+        )));
+    }
 
-    // Idempotency check
+    if request.amount <= 0 {
+        return Err(ApiError::BadRequest("Amount must be positive".to_string()));
+    }
+
+    let mut transaction = state.db_pool.begin().await?;
+
     if let Some(existing_payment) =
         Payment::get_by_client_id(&mut transaction, &request.client_id, &request.account_name).await?
     {
         transaction.commit().await?;
         return Ok((StatusCode::OK, Json(PaymentResponse::from(existing_payment))));
-    }
-
-    // Validate amount
-    if request.amount <= 0 {
-        return Err(ApiError::BadRequest("Amount must be positive".to_string()));
     }
 
     let new_payment = Payment::create(
@@ -111,7 +118,7 @@ pub async fn api_create_payment(
         &request.account_name,
         &request.recipient_address,
         request.amount,
-        None, // payment_id is generated internally
+        request.payment_id,
     )
     .await?;
 
