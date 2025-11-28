@@ -15,7 +15,6 @@ use tari_transaction_components::key_manager::{
 use tari_transaction_components::offline_signing::{PaymentRecipient, prepare_one_sided_transaction_for_signing};
 use tari_transaction_components::{
     TransactionBuilder,
-    // offline_signing::offline_signer::OfflineSigner,
     tari_amount::MicroMinotari,
     transaction_components::{MemoField, OutputFeatures, WalletOutput, memo_field::TxType},
 };
