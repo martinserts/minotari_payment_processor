@@ -39,6 +39,7 @@ pub struct PaymentProcessorEnv {
     pub broadcaster_sleep_secs: Option<u64>,
     pub confirmation_checker_sleep_secs: Option<u64>,
     pub confirmation_checker_required_confirmations: Option<u64>,
+    pub max_input_count_per_tx: usize,
     pub accounts: HashMap<String, PaymentReceiverAccount>,
 }
 
@@ -69,6 +70,7 @@ struct RawSettings {
     broadcaster_sleep_secs: Option<u64>,
     confirmation_checker_sleep_secs: Option<u64>,
     confirmation_checker_required_confirmations: Option<u64>,
+    max_input_count_per_tx: Option<usize>,
     #[serde(default)]
     accounts: HashMap<String, RawAccount>,
 }
@@ -150,6 +152,7 @@ impl TryFrom<RawSettings> for PaymentProcessorEnv {
             broadcaster_sleep_secs: raw.broadcaster_sleep_secs,
             confirmation_checker_sleep_secs: raw.confirmation_checker_sleep_secs,
             confirmation_checker_required_confirmations: raw.confirmation_checker_required_confirmations,
+            max_input_count_per_tx: raw.max_input_count_per_tx.unwrap_or(400).min(400),
             accounts,
         })
     }

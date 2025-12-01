@@ -2,12 +2,18 @@ use anyhow::{Context, anyhow};
 use sqlx::{SqliteConnection, SqlitePool};
 use std::io::Write;
 use tari_common::configuration::Network;
+use tari_transaction_components::key_manager::SerializedKeyString;
+use tari_transaction_components::key_manager::TariKeyId;
+use tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult;
+use tari_transaction_components::offline_signing::models::TransactionResult;
 use tempfile::NamedTempFile;
 use tokio::fs;
 use tokio::process::Command;
 use tokio::time::{self, Duration};
 
-use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
+use crate::db::payment_batch::StepPayload;
+use crate::db::payment_batch::{BatchPayload, PaymentBatch, PaymentBatchStatus};
+use crate::workers::types::IntermediateContext;
 
 const DEFAULT_SLEEP_SECS: u64 = 10;
 
@@ -115,47 +121,88 @@ async fn process_single_batch(
 
     println!("INFO: Batch {}: Status updated to 'SigningInProgress'.", batch_id);
 
-    let unsigned_tx_json = batch
+    let unsigned_json_str = batch
         .unsigned_tx_json
         .clone()
         .ok_or_else(|| anyhow!("Batch {} has no unsigned_tx_json", batch_id))?;
 
-    let mut input_file = NamedTempFile::with_prefix("unsigned-tx-").context("Failed to create temp input file")?;
-    let input_path = input_file.path().to_path_buf();
+    let mut payload = BatchPayload::from_json(&unsigned_json_str)?;
+    let steps_count = payload.steps.len();
 
-    input_file
-        .write_all(unsigned_tx_json.as_bytes())
-        .context("Failed to write unsigned tx to temp file")?;
-    input_file.flush().context("Failed to flush input file")?;
+    println!("INFO: Batch {}: Found {} steps to sign.", batch_id, payload.steps.len());
 
-    let output_file = NamedTempFile::with_prefix("signed-tx-").context("Failed to create temp output file")?;
-    let output_path = output_file.path().to_path_buf();
+    let mut consolidated_wallet_outputs = vec![];
+    for (i, step) in payload.steps.iter_mut().enumerate() {
+        println!(
+            "INFO: Batch {}: Signing Step {}/{} (ID: {})",
+            batch_id,
+            i + 1,
+            steps_count,
+            step.tx_id
+        );
 
-    println!(
-        "INFO: Batch {}: Temp files prepared. Input: {:?}, Output: {:?}",
-        batch_id, input_path, output_path
-    );
+        let unsigned_json = match &step.payload {
+            StepPayload::Unsigned(s) => s,
+            StepPayload::Signed(_) => return Err(anyhow!("Step {} is already signed!", i)),
+        };
 
-    println!("INFO: Batch {}: Invoking external signer CLI...", batch_id);
+        let mut input_file = NamedTempFile::with_prefix(format!("unsigned-tx-{}-step{}-", batch_id, i))
+            .context("Failed to create temp input file")?;
+        let input_path = input_file.path().to_path_buf();
 
-    sign_with_cli(
-        network,
-        console_wallet_path,
-        console_wallet_password,
-        console_wallet_base_path,
-        &input_path,
-        &output_path,
-    )
-    .await
-    .context("External signing process failed")?;
+        input_file
+            .write_all(unsigned_json.as_bytes())
+            .context("Failed to write unsigned tx to temp file")?;
+        input_file.flush().context("Failed to flush input file")?;
 
-    println!("INFO: Batch {}: External signer CLI finished successfully.", batch_id);
+        let output_file = NamedTempFile::with_prefix(format!("signed-tx-{}-step{}-", batch_id, i))
+            .context("Failed to create temp output file")?;
+        let output_path = output_file.path().to_path_buf();
 
-    let signed_tx_json = fs::read_to_string(&output_path)
+        sign_with_cli(
+            network,
+            console_wallet_path,
+            console_wallet_password,
+            console_wallet_base_path,
+            &input_path,
+            &output_path,
+        )
         .await
-        .context("Failed to read signed transaction from output file")?;
+        .context(format!("External signing process failed for step {}", i))?;
 
-    PaymentBatch::update_to_awaiting_broadcast(conn, batch_id, &signed_tx_json)
+        let signed_json = fs::read_to_string(&output_path)
+            .await
+            .context("Failed to read signed transaction from output file")?;
+
+        if step.is_consolidation {
+            let signed_tx_wrapper = SignedOneSidedTransactionResult::from_json(&signed_json)
+                .map_err(|e| anyhow!("Failed to deserialize signed tx for step {}: {}", i, e))?;
+            for output in &signed_tx_wrapper.signed_transaction.outputs {
+                let mut cloned_output = output.clone();
+                let script_key_id = TariKeyId::Derived {
+                    key: SerializedKeyString::from(output.commitment_mask_key_id().to_string()),
+                };
+                cloned_output.set_script_key_id(script_key_id);
+                consolidated_wallet_outputs.push(cloned_output);
+            }
+        }
+
+        step.payload = StepPayload::Signed(signed_json);
+    }
+
+    println!("INFO: Batch {}: All steps signed successfully.", batch_id);
+
+    let intermediate_context = if consolidated_wallet_outputs.is_empty() {
+        None
+    } else {
+        let ctx = IntermediateContext {
+            utxos: consolidated_wallet_outputs,
+        };
+        Some(ctx.to_json()?)
+    };
+
+    let signed_payload_json = payload.to_json()?;
+    PaymentBatch::update_to_awaiting_broadcast(conn, batch_id, &signed_payload_json, intermediate_context.as_deref())
         .await
         .context("Failed to update status to AwaitingBroadcast")?;
 

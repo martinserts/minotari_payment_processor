@@ -25,11 +25,12 @@ minotari-client = { path = "../minotari-client" }
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3.23.0"
 
-minotari_node_wallet_client  = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
-tari_common = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
-tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
+minotari_node_wallet_client  = { git = "https://github.com/tari-project/tari/", rev = "9406e482007ac8b8c63db8b76fd8fd92d244ca09" }
+tari_common = { git = "https://github.com/tari-project/tari/", rev = "9406e482007ac8b8c63db8b76fd8fd92d244ca09" }
+tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "9406e482007ac8b8c63db8b76fd8fd92d244ca09" }
+tari_script  = { git = "https://github.com/tari-project/tari/", rev = "9406e482007ac8b8c63db8b76fd8fd92d244ca09" }
 tari_crypto = { version = "0.22.1", features = ["borsh"] }
-tari_transaction_components  = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
+tari_transaction_components  = { git = "https://github.com/tari-project/tari/", rev = "9406e482007ac8b8c63db8b76fd8fd92d244ca09" }
 tari_utilities = { version = "0.8" }
 hex = "0.4.3"
 dotenv = "0.15.0"

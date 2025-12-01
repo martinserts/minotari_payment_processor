@@ -8,6 +8,8 @@ use tari_utilities::byte_array::ByteArray;
 use tokio::time::{self, Duration};
 
 use crate::db::payment::Payment;
+use crate::db::payment_batch::BatchPayload;
+use crate::db::payment_batch::StepPayload;
 use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
 
 const DEFAULT_SLEEP_SECS: u64 = 60;
@@ -72,12 +74,19 @@ async fn process_single_batch(
 
     println!("INFO: Checking status for Batch ID: {}", batch_id);
 
-    let signed_tx_json = batch
-        .signed_tx_json
-        .clone()
-        .ok_or_else(|| anyhow!("Batch {} has no signed_tx_json", batch_id))?;
+    let payload = match &batch.signed_tx_json {
+        Some(payload) => BatchPayload::from_json(payload)?,
+        None => return Err(anyhow!("Batch {} has no signed_tx_json", batch_id)),
+    };
+    let signed_tx_json = match &payload.steps[..] {
+        [step] => match &step.payload {
+            StepPayload::Signed(s) => s,
+            StepPayload::Unsigned(_) => return Err(anyhow!("Payload is not signed!")),
+        },
+        _ => return Err(anyhow!("Batch {} does not have exactly one step", batch_id)),
+    };
 
-    let signed_tx = SignedOneSidedTransactionResult::from_json(&signed_tx_json)?;
+    let signed_tx = SignedOneSidedTransactionResult::from_json(signed_tx_json)?;
 
     let kernel = signed_tx
         .signed_transaction

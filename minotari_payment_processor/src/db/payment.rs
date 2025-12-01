@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::Connection;
 use sqlx::{FromRow, SqliteConnection};
 use std::fmt;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::db::payment_batch::PaymentBatch;
+use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -14,6 +15,7 @@ pub enum PaymentStatus {
     Batched,
     Confirmed,
     Failed,
+    Cancelled,
 }
 
 impl From<String> for PaymentStatus {
@@ -23,6 +25,7 @@ impl From<String> for PaymentStatus {
             "BATCHED" => PaymentStatus::Batched,
             "CONFIRMED" => PaymentStatus::Confirmed,
             "FAILED" => PaymentStatus::Failed,
+            "CANCELLED" => PaymentStatus::Cancelled,
             _ => panic!("Unknown PaymentStatus: {}", s),
         }
     }
@@ -35,6 +38,7 @@ impl fmt::Display for PaymentStatus {
             PaymentStatus::Batched => write!(f, "BATCHED"),
             PaymentStatus::Confirmed => write!(f, "CONFIRMED"),
             PaymentStatus::Failed => write!(f, "FAILED"),
+            PaymentStatus::Cancelled => write!(f, "CANCELLED"),
         }
     }
 }
@@ -194,7 +198,11 @@ impl Payment {
         sqlx::query!(
             r#"
             UPDATE payments
-            SET status = ?, payment_batch_id = ?, failure_reason = ?, updated_at = CURRENT_TIMESTAMP
+            SET 
+                status = ?, 
+                payment_batch_id = COALESCE(?, payment_batch_id), 
+                failure_reason = ?, 
+                updated_at = CURRENT_TIMESTAMP
             WHERE id IN (SELECT value FROM json_each(?))
             "#,
             status,
@@ -233,6 +241,48 @@ impl Payment {
         Self::update_payment_status(pool, payment_ids, PaymentStatus::Failed, None, Some(reason)).await
     }
 
+    /// Updates the status of a payment to 'CANCELLED'.
+    pub async fn update_to_cancelled(pool: &mut SqliteConnection, payment_id: &str) -> Result<(), sqlx::Error> {
+        Self::update_payment_status(pool, &[payment_id.to_string()], PaymentStatus::Cancelled, None, None).await
+    }
+
+    pub async fn cancel_single_payment(
+        pool: &mut SqliteConnection,
+        payment_id: &str,
+    ) -> Result<PaymentStatus, anyhow::Error> {
+        let mut tx = pool.begin().await?;
+
+        let (payment, batch_opt) = Self::get_by_id_with_batch_info(&mut tx, payment_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Payment not found"))?;
+
+        if let Some(ref batch) = batch_opt {
+            match batch.status {
+                PaymentBatchStatus::PendingBatching | PaymentBatchStatus::AwaitingSignature => {},
+                _ => return Err(anyhow::anyhow!("Batch is too far along to cancel payment")),
+            }
+        } else if matches!(
+            payment.status,
+            PaymentStatus::Confirmed | PaymentStatus::Failed | PaymentStatus::Cancelled
+        ) {
+            return Err(anyhow::anyhow!("Payment is already in final state"));
+        }
+
+        Self::update_to_cancelled(&mut tx, payment_id).await?;
+
+        if let Some(batch) = batch_opt {
+            let remaining = Self::find_by_batch_id(&mut tx, &batch.id).await?;
+            if remaining.is_empty() {
+                PaymentBatch::cancel_batch_internal(&mut tx, &batch.id).await?;
+            } else {
+                PaymentBatch::recalc_batch_after_modification(&mut tx, &batch.id).await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(PaymentStatus::Cancelled)
+    }
+
     /// Updates the status of all payments in a batch to 'FAILED' with a reason.
     pub async fn fail_payments_in_batch(
         pool: &mut SqliteConnection,
@@ -257,6 +307,8 @@ impl Payment {
 
     /// Finds payments associated with a specific payment batch ID.
     pub async fn find_by_batch_id(pool: &mut SqliteConnection, batch_id: &str) -> Result<Vec<Self>, sqlx::Error> {
+        let status_cancelled = PaymentStatus::Cancelled.to_string();
+        let status_failed = PaymentStatus::Failed.to_string();
         sqlx::query_as!(
             Payment,
             r#"
@@ -274,8 +326,11 @@ impl Payment {
                 updated_at as "updated_at: DateTime<Utc>"
             FROM payments
             WHERE payment_batch_id = ?
+              AND status NOT IN (?, ?)
             "#,
-            batch_id
+            batch_id,
+            status_cancelled,
+            status_failed,
         )
         .fetch_all(pool)
         .await
@@ -309,6 +364,7 @@ impl Payment {
                 pb.signed_tx_json as batch_signed_tx_json,
                 pb.error_message as batch_error_message,
                 pb.retry_count as batch_retry_count,
+                pb.intermediate_context_json as batch_intermediate_context_json,
                 pb.mined_height as batch_mined_height,
                 pb.mined_header_hash as batch_mined_header_hash,
                 pb.mined_timestamp as batch_mined_timestamp,
@@ -347,6 +403,7 @@ impl Payment {
                     signed_tx_json: row.batch_signed_tx_json,
                     error_message: row.batch_error_message,
                     retry_count: row.batch_retry_count.unwrap(),
+                    intermediate_context_json: row.batch_intermediate_context_json,
                     mined_height: row.batch_mined_height,
                     mined_header_hash: row.batch_mined_header_hash,
                     mined_timestamp: row.batch_mined_timestamp,
@@ -380,6 +437,7 @@ struct PaymentWithBatch {
     batch_unsigned_tx_json: Option<String>,
     batch_signed_tx_json: Option<String>,
     batch_error_message: Option<String>,
+    batch_intermediate_context_json: Option<String>,
     batch_retry_count: Option<i64>,
     batch_mined_height: Option<i64>,
     batch_mined_header_hash: Option<String>,
