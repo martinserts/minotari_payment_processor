@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tari_common::configuration::Network;
 use tari_common_types::tari_address::TariAddress;
 use tari_common_types::transaction::TxId;
+use tari_script::TariScript;
 use tari_transaction_components::consensus::ConsensusConstantsBuilder;
 use tari_transaction_components::key_manager::{
     KeyManager,
@@ -15,22 +16,30 @@ use tari_transaction_components::key_manager::{
 use tari_transaction_components::offline_signing::{PaymentRecipient, prepare_one_sided_transaction_for_signing};
 use tari_transaction_components::{
     TransactionBuilder,
+    fee::Fee,
+    helpers::borsh::SerializedSize,
     tari_amount::MicroMinotari,
-    transaction_components::{MemoField, OutputFeatures, WalletOutput, memo_field::TxType},
+    transaction_components::{MemoField, OutputFeatures, WalletOutput, covenants::Covenant, memo_field::TxType},
+    weight::TransactionWeight,
 };
 use tokio::time::{self, Duration};
 
 use crate::config::PaymentReceiverAccount;
 use crate::db::payment::Payment;
-use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
+use crate::db::payment_batch::{BatchPayload, PaymentBatch, PaymentBatchStatus, StepPayload, TransactionStep};
+use crate::workers::types::IntermediateContext;
 
 const DEFAULT_SLEEP_SECS: u64 = 15;
+const FEE_PER_GRAM: u64 = 5;
+// Buffer to ensure we have enough funds left for the final payment after paying for split fees.
+const FEE_BUFFER_AMOUNT: i64 = 200_000;
 
 pub async fn run(
     db_pool: SqlitePool,
     client_config: Arc<Configuration>,
     network: Network,
     accounts: HashMap<String, PaymentReceiverAccount>,
+    max_input_count_per_tx: usize,
     sleep_secs: Option<u64>,
 ) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
@@ -43,7 +52,9 @@ pub async fn run(
 
     loop {
         interval.tick().await;
-        if let Err(e) = process_unsigned_transactions(&db_pool, &client_config, network, &accounts).await {
+        if let Err(e) =
+            process_unsigned_transactions(&db_pool, &client_config, network, &accounts, max_input_count_per_tx).await
+        {
             eprintln!("Unsigned Transaction Creator worker error: {:?}", e);
         }
     }
@@ -54,6 +65,7 @@ async fn process_unsigned_transactions(
     client_config: &Configuration,
     network: Network,
     accounts: &HashMap<String, PaymentReceiverAccount>,
+    max_input_count_per_tx: usize,
 ) -> Result<(), anyhow::Error> {
     let mut conn = db_pool.acquire().await?;
 
@@ -67,7 +79,16 @@ async fn process_unsigned_transactions(
     }
 
     for batch in batches {
-        if let Err(e) = process_single_batch(&mut conn, client_config, network, accounts, &batch).await {
+        if let Err(e) = process_single_batch(
+            &mut conn,
+            client_config,
+            network,
+            accounts,
+            &batch,
+            max_input_count_per_tx,
+        )
+        .await
+        {
             let error_message = e.to_string();
             eprintln!(
                 "Error processing batch {}: {}. Incrementing retry count.",
@@ -92,6 +113,7 @@ async fn process_single_batch(
     network: Network,
     accounts: &HashMap<String, PaymentReceiverAccount>,
     batch: &PaymentBatch,
+    max_input_count_per_tx: usize,
 ) -> Result<(), anyhow::Error> {
     let batch_id = &batch.id;
     println!("INFO: Starting processing for Batch ID: {}", batch_id);
@@ -101,74 +123,208 @@ async fn process_single_batch(
         .context("Failed to fetch payments for batch")?;
 
     if associated_payments.is_empty() {
-        return Err(anyhow!("Batch {} has no associated payments", batch_id));
+        println!(
+            "WARN: Batch {} has no active payments. Marking batch as CANCELLED.",
+            batch_id
+        );
+        PaymentBatch::update_to_failed(conn, batch_id, "No active payments found in batch").await?;
+        return Ok(());
     }
 
-    let total_amount: i64 = associated_payments.iter().map(|p| p.amount).sum();
     let account_name = &batch.account_name;
+    let sender_account = accounts
+        .get(&account_name.to_lowercase())
+        .ok_or_else(|| anyhow!("Account '{}' not found in local configuration", account_name))?;
 
-    println!(
-        "INFO: Batch {}: Locking funds via API. Account: '{}', Total Amount: {}",
-        batch_id, account_name, total_amount
-    );
+    // --- CYCLE 2 (Finalize) OR CYCLE 1 (Inputs Check) ---
+    if let Some(context_json) = &batch.intermediate_context_json {
+        // === CYCLE 2: FINALIZE ===
+        println!(
+            "INFO: Batch {}: Found intermediate context. Executing CYCLE 2 (Finalize).",
+            batch_id
+        );
 
-    let lock_funds_request = LockFundsRequest {
-        amount: total_amount,
-        idempotency_key: Some(Some(batch.pr_idempotency_key.clone())),
-        ..Default::default()
-    };
+        let context = IntermediateContext::from_json(context_json)?;
+        let inputs = context.utxos;
 
-    let locked_funds = match accounts_api::api_lock_funds(client_config, account_name, lock_funds_request).await {
-        Ok(response) => {
+        println!(
+            "INFO: Batch {}: Using {} intermediate inputs for final transaction.",
+            batch_id,
+            inputs.len()
+        );
+
+        let final_step = create_transaction_step(network, sender_account, inputs, &associated_payments, 0).await?;
+
+        let payload = BatchPayload {
+            steps: vec![final_step],
+        };
+        let payload_json = payload.to_json()?;
+
+        PaymentBatch::update_to_awaiting_signature(conn, batch_id, &payload_json)
+            .await
+            .context("Failed to update batch to AwaitingSignature (Cycle 2)")?;
+
+        println!(
+            "INFO: Batch {}: Cycle 2 preparation complete. Ready for signature.",
+            batch_id
+        );
+    } else {
+        // === CYCLE 1: FETCH & ANALYZE ===
+        println!(
+            "INFO: Batch {}: No context found. Fetching fresh UTXOs from API.",
+            batch_id
+        );
+
+        let payment_total: i64 = associated_payments.iter().map(|p| p.amount).sum();
+        let amount_to_lock = payment_total + FEE_BUFFER_AMOUNT;
+        let account_balance = accounts_api::api_get_balance(client_config, account_name).await?;
+        let balance = account_balance.total_credits.flatten().unwrap_or_default()
+            - account_balance.total_debits.flatten().unwrap_or_default();
+
+        if balance < amount_to_lock {
             println!(
-                "INFO: Batch {}: Funds locked successfully. Received {} inputs (UTXOs).",
-                batch_id,
-                response.utxos.len()
+                "WARN: Batch {}: Not enough funds in wallet {}. Requested (w/ buffer): {}, Actual: {}.",
+                batch_id, account_name, amount_to_lock, balance
             );
-            response
-        },
-        Err(ApiError::ResponseError(response_content)) => {
-            return Err(anyhow!(
-                "PR API returned unexpected status: {} - {}",
-                response_content.status,
-                response_content.content
-            ));
-        },
-        Err(e) => return Err(anyhow!("Network error calling PR API: {:?}", e)),
-    };
+            return Ok(());
+        }
 
-    println!("INFO: Batch {}: Preparing local offline signer...", batch_id);
+        let lock_request = LockFundsRequest {
+            amount: amount_to_lock,
+            idempotency_key: Some(Some(batch.pr_idempotency_key.clone())),
+            ..Default::default()
+        };
 
-    let first_recipient = &associated_payments[0];
-    let account = accounts
-        .get(&first_recipient.account_name.to_lowercase())
-        .ok_or_else(|| {
-            anyhow!(
-                "Account '{}' not found in local configuration",
-                first_recipient.account_name
-            )
-        })?;
+        let locked_funds = match accounts_api::api_lock_funds(client_config, account_name, lock_request).await {
+            Ok(res) => res,
+            Err(ApiError::ResponseError(c)) => return Err(anyhow!("PR API Error: {} - {}", c.status, c.content)),
+            Err(e) => return Err(anyhow!("Network error calling PR API: {:?}", e)),
+        };
 
-    let view_wallet = ViewWallet::new(account.public_spend_key.clone(), account.view_key.clone(), None);
+        let mut inputs: Vec<WalletOutput> = Vec::new();
+        for utxo_val in locked_funds.utxos {
+            let utxo: WalletOutput =
+                serde_json::from_value(utxo_val).map_err(|e| anyhow!("Failed to deserialize UTXO: {}", e))?;
+            inputs.push(utxo);
+        }
+
+        println!("INFO: Batch {}: API returned {} UTXOs.", batch_id, inputs.len());
+
+        if inputs.len() > max_input_count_per_tx {
+            // === SPLIT LOGIC ===
+            println!(
+                "INFO: Batch {}: Input count ({}) exceeds limit ({}). Initiating SPLIT (CoinJoin).",
+                batch_id,
+                inputs.len(),
+                max_input_count_per_tx
+            );
+
+            let chunks = inputs.chunks(max_input_count_per_tx);
+            let mut steps = Vec::new();
+
+            for (i, chunk) in chunks.enumerate() {
+                let tx_step = create_self_spend_step(network, sender_account, chunk.to_vec(), i).await?;
+                steps.push(tx_step);
+            }
+
+            let payload = BatchPayload { steps };
+            let payload_json = payload.to_json()?;
+
+            PaymentBatch::update_to_awaiting_signature(conn, batch_id, &payload_json)
+                .await
+                .context("Failed to update batch to AwaitingSignature (Split Cycle)")?;
+
+            println!(
+                "INFO: Batch {}: Split Cycle preparation complete. {} steps created.",
+                batch_id,
+                payload.steps.len()
+            );
+        } else {
+            // === NORMAL LOGIC ===
+            println!(
+                "INFO: Batch {}: Input count within limits. creating standard transaction.",
+                batch_id
+            );
+
+            let step = create_transaction_step(network, sender_account, inputs, &associated_payments, 0).await?;
+
+            let payload = BatchPayload { steps: vec![step] };
+            let payload_json = payload.to_json()?;
+
+            PaymentBatch::update_to_awaiting_signature(conn, batch_id, &payload_json)
+                .await
+                .context("Failed to update batch to AwaitingSignature (Normal)")?;
+
+            println!("INFO: Batch {}: Normal preparation complete.", batch_id);
+        }
+    }
+
+    Ok(())
+}
+
+async fn prepare_signing_request(
+    network: Network,
+    tx_id: TxId,
+    sender_account: &PaymentReceiverAccount,
+    inputs: &[WalletOutput],
+    recipients: &[PaymentRecipient],
+) -> Result<String, anyhow::Error> {
+    let view_wallet = ViewWallet::new(
+        sender_account.public_spend_key.clone(),
+        sender_account.view_key.clone(),
+        None,
+    );
     let key_manager = KeyManager::new(WalletType::ViewWallet(view_wallet)).context("Failed to create KeyManager")?;
 
     let consensus_constants = ConsensusConstantsBuilder::new(network).build();
-    let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)
+    let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager, network)
         .context("Failed to create TransactionBuilder")?;
 
-    tx_builder.with_fee_per_gram(MicroMinotari(5));
+    tx_builder.with_fee_per_gram(MicroMinotari(FEE_PER_GRAM));
 
-    for utxo_value in &locked_funds.utxos {
-        let utxo: WalletOutput =
-            serde_json::from_value(utxo_value.clone()).map_err(|e| anyhow!("Failed to deserialize utxo: {}", e))?;
-        tx_builder
-            .with_input(utxo)
-            .context("Failed to add input to transaction")?;
+    for input in inputs {
+        tx_builder.with_input(input.clone()).context("Failed to add input")?;
     }
 
-    let output_features = OutputFeatures::default();
+    let prepare_result = prepare_one_sided_transaction_for_signing(
+        tx_id,
+        tx_builder,
+        recipients,
+        MemoField::new_empty(),
+        sender_account.address.clone(),
+    )
+    .context("Failed to prepare one-sided transaction")?;
+
+    let tx_json = serde_json::to_string(&prepare_result)?;
+    Ok(tx_json)
+}
+
+fn get_single_output_metadata_size(fee_calc: &Fee) -> Result<usize, anyhow::Error> {
+    let output_features_size = OutputFeatures::default()
+        .get_serialized_size()
+        .map_err(|e| anyhow!("Serialization error: {}", e))?;
+    let tari_script_size = TariScript::default()
+        .get_serialized_size()
+        .map_err(|e| anyhow!("Serialization error: {}", e))?;
+    let covenant_size = Covenant::default()
+        .get_serialized_size()
+        .map_err(|e| anyhow!("Serialization error: {}", e))?;
+
+    Ok(fee_calc
+        .weighting()
+        .round_up_features_and_scripts_size(output_features_size + tari_script_size + covenant_size))
+}
+
+async fn create_transaction_step(
+    network: Network,
+    sender_account: &PaymentReceiverAccount,
+    inputs: Vec<WalletOutput>,
+    payments: &[Payment],
+    step_index: usize,
+) -> Result<TransactionStep, anyhow::Error> {
     let tx_id = TxId::new_random();
-    let recipients: Vec<PaymentRecipient> = associated_payments
+    let output_features = OutputFeatures::default();
+    let recipients: Vec<PaymentRecipient> = payments
         .iter()
         .map(|p| -> Result<PaymentRecipient, anyhow::Error> {
             let payment_id = match &p.payment_id {
@@ -190,24 +346,63 @@ async fn process_single_batch(
             })
         })
         .collect::<Result<Vec<PaymentRecipient>, anyhow::Error>>()?;
+    let tx_json = prepare_signing_request(network, tx_id, sender_account, &inputs, &recipients).await?;
 
-    println!("INFO: Batch {}: Building transaction outputs...", batch_id);
+    Ok(TransactionStep {
+        step_index,
+        is_consolidation: false,
+        payload: StepPayload::Unsigned(tx_json),
+        tx_id,
+    })
+}
 
-    let payment_id = MemoField::new_empty();
-    let result =
-        prepare_one_sided_transaction_for_signing(tx_id, tx_builder, &recipients, payment_id, account.address.clone())
-            .context("Failed to prepare one-sided transaction")?;
+async fn create_self_spend_step(
+    network: Network,
+    sender_account: &PaymentReceiverAccount,
+    inputs: Vec<WalletOutput>,
+    step_index: usize,
+) -> Result<TransactionStep, anyhow::Error> {
+    let tx_id = TxId::new_random();
 
-    let response_text = serde_json::to_string(&result).context("Failed to serialize transaction result")?;
+    let total_input_value: MicroMinotari = inputs.iter().map(|p| p.value()).sum();
+    let fee_calc = Fee::new(TransactionWeight::latest());
+    let output_metadata_size = get_single_output_metadata_size(&fee_calc)?;
+    let calculated_fee = fee_calc.calculate(MicroMinotari(FEE_PER_GRAM), 1, inputs.len(), 1, output_metadata_size);
 
-    PaymentBatch::update_to_awaiting_signature(conn, batch_id, &response_text)
-        .await
-        .context("Failed to update batch status to AwaitingSignature")?;
+    if calculated_fee >= total_input_value {
+        return Err(anyhow!(
+            "Input value {:?} is too small to cover fees {:?}",
+            total_input_value,
+            calculated_fee
+        ));
+    }
+
+    let amount_to_self = total_input_value - calculated_fee;
 
     println!(
-        "INFO: Batch {}: Unsigned transaction created. Status updated to 'AwaitingSignature'.",
-        batch_id
+        "DEBUG: Self-Spend Step {}: Inputs Sum: {:?}, Inputs Count: {}, Fee: {:?}, Net Output: {:?}",
+        step_index,
+        total_input_value,
+        inputs.len(),
+        calculated_fee,
+        amount_to_self
     );
 
-    Ok(())
+    let output_features = OutputFeatures::default();
+    let recipient = PaymentRecipient {
+        amount: amount_to_self,
+        output_features,
+        address: sender_account.address.clone(),
+        payment_id: MemoField::new_empty(),
+    };
+
+    let recipients = vec![recipient];
+    let tx_json = prepare_signing_request(network, tx_id, sender_account, &inputs, &recipients).await?;
+
+    Ok(TransactionStep {
+        step_index,
+        is_consolidation: true,
+        payload: StepPayload::Unsigned(tx_json),
+        tx_id,
+    })
 }

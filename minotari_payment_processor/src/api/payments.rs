@@ -77,6 +77,12 @@ impl From<Payment> for PaymentResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PaymentCancelResponse {
+    pub payment_id: String,
+    pub status: PaymentStatus,
+}
+
 #[utoipa::path(
     post,
     path = "/v1/payments",
@@ -130,6 +136,9 @@ pub async fn api_create_payment(
 #[utoipa::path(
     get,
     path = "/v1/payments/{payment_id}",
+    params(
+        ("payment_id" = String, Path, description = "Unique identifier of the payment")
+    ),
     responses(
         (status = 200, description = "Payment status retrieved successfully", body = PaymentResponse),
         (status = 404, description = "Payment not found", body = ApiError),
@@ -147,4 +156,36 @@ pub async fn api_get_payment(
         .ok_or_else(|| ApiError::NotFound("Payment not found".to_string()))?;
 
     Ok(Json(PaymentResponse::from_payment_and_batch(payment, payment_batch)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/payments/{payment_id}/cancel",
+    params(
+        ("payment_id" = String, Path, description = "Unique identifier of the payment")
+    ),
+    responses(
+        (status = 200, description = "Payment cancelled successfully", body = PaymentCancelResponse),
+        (status = 400, description = "Bad request (Payment cannot be cancelled in current state)", body = ApiError),
+        (status = 404, description = "Payment not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
+pub async fn api_cancel_payment(
+    State(db_pool): State<SqlitePool>,
+    Path(payment_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut conn = db_pool.acquire().await?;
+
+    match Payment::cancel_single_payment(&mut conn, &payment_id).await {
+        Ok(status) => Ok((StatusCode::OK, Json(PaymentCancelResponse { payment_id, status }))),
+        Err(e) => {
+            let err_msg = e.to_string();
+            if err_msg.contains("Payment not found") {
+                Err(ApiError::NotFound(err_msg))
+            } else {
+                Err(ApiError::BadRequest(err_msg))
+            }
+        },
+    }
 }

@@ -1,20 +1,24 @@
 ```mermaid
 stateDiagram-v2
-    [*] --> PendingBatching: <b>Batch Creator</b><br/>Groups pending payments
+    [*] --> PendingBatching
+
+    state "Unsigned TX Creator" as UTC
+    state "Transaction Signer" as TS
+    state "Broadcaster" as BC
     
-    PendingBatching --> AwaitingSignature: <b>Unsigned TX Creator</b><br/>Fetches unsigned TX from API
-    PendingBatching --> Failed: Error
+    PendingBatching --> UTC
+    UTC --> AwaitingSignature: <b>Normal / Final Path</b><br/>(Inputs < Limit OR Cycle 2)
     
-    AwaitingSignature --> SigningInProgress: <b>TX Signer</b><br/>Locks batch
-    SigningInProgress --> AwaitingBroadcast: <b>TX Signer</b><br/>Signs via Console Wallet
-    SigningInProgress --> Failed: Signing Error
+    UTC --> AwaitingSignature: <b>Split Path (Cycle 1)</b><br/>Create Split TXs (Consolidation)
     
-    AwaitingBroadcast --> Broadcasting: <b>Broadcaster</b><br/>Locks batch
-    Broadcasting --> AwaitingConfirmation: <b>Broadcaster</b><br/>Submits to Base Node
-    Broadcasting --> Failed: Node Rejection / Max Retries
+    AwaitingSignature --> TS
+    TS --> AwaitingBroadcast: Sign all TXs in list
     
-    AwaitingConfirmation --> Confirmed: <b>Confirmation Checker</b><br/>Wait for N blocks
+    AwaitingBroadcast --> BC
     
-    Confirmed --> [*]
-    Failed --> [*]
+    BC --> AwaitingConfirmation: <b>Final Path</b><br/>(is_consolidation = false)
+    
+    BC --> PendingBatching: <b>Split Path Loopback</b><br/>(is_consolidation = true)<br/>1. Submit Split TXs<br/>2. Verify Mempool<br/>3. Reset Status
+    
+    AwaitingConfirmation --> Confirmed: Check Chain Tip
 ```

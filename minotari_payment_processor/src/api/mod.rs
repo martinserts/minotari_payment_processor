@@ -31,12 +31,16 @@ impl FromRef<AppState> for SqlitePool {
         version::api_get_version,
         payments::api_create_payment,
         payments::api_get_payment,
+        payments::api_cancel_payment,
     ),
     components(
         schemas(
             version::ServiceVersion,
             payments::PaymentRequest,
             payments::PaymentResponse,
+            payments::PaymentCancelResponse,
+            crate::db::payment::PaymentStatus,
+            error::ApiError,
         )
     ),
     tags(
@@ -53,5 +57,6 @@ pub fn create_router(db_pool: SqlitePool, env: PaymentProcessorEnv) -> Router {
         .route("/health/version", get(version::api_get_version))
         .route("/v1/payments", post(payments::api_create_payment))
         .route("/v1/payments/{payment_id}", get(payments::api_get_payment))
+        .route("/v1/payments/{payment_id}/cancel", post(payments::api_cancel_payment))
         .with_state(app_state)
 }

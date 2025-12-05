@@ -1,13 +1,49 @@
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, FromRow, SqliteConnection};
 use std::fmt;
+use tari_common_types::transaction::TxId;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::db::payment::{Payment, PaymentStatus};
 
 const MAX_RETRIES: i64 = 10;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StepPayload {
+    /// The payload needed by the Console Wallet to generate a signature.
+    Unsigned(String),
+    /// The payload returned by the Console Wallet, ready for Broadcast.
+    Signed(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionStep {
+    pub step_index: usize,
+    /// If true, this TX is consolidating inputs (spending to self).
+    /// If false, this is the final payment to the client.
+    pub is_consolidation: bool,
+    pub payload: StepPayload,
+    pub tx_id: TxId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchPayload {
+    pub steps: Vec<TransactionStep>,
+}
+
+impl BatchPayload {
+    pub fn from_json(json: &str) -> anyhow::Result<Self> {
+        serde_json::from_str(json).context("Failed to deserialize BatchPayload")
+    }
+
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self).context("Failed to serialize BatchPayload")
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -20,6 +56,7 @@ pub enum PaymentBatchStatus {
     AwaitingConfirmation,
     Confirmed,
     Failed,
+    Cancelled,
 }
 
 impl From<String> for PaymentBatchStatus {
@@ -33,6 +70,7 @@ impl From<String> for PaymentBatchStatus {
             "AWAITING_CONFIRMATION" => PaymentBatchStatus::AwaitingConfirmation,
             "CONFIRMED" => PaymentBatchStatus::Confirmed,
             "FAILED" => PaymentBatchStatus::Failed,
+            "CANCELLED" => PaymentBatchStatus::Cancelled,
             _ => panic!("Unknown PaymentBatchStatus: {}", s),
         }
     }
@@ -49,6 +87,7 @@ impl fmt::Display for PaymentBatchStatus {
             PaymentBatchStatus::AwaitingConfirmation => write!(f, "AWAITING_CONFIRMATION"),
             PaymentBatchStatus::Confirmed => write!(f, "CONFIRMED"),
             PaymentBatchStatus::Failed => write!(f, "FAILED"),
+            PaymentBatchStatus::Cancelled => write!(f, "CANCELLED"),
         }
     }
 }
@@ -63,6 +102,7 @@ pub struct PaymentBatch {
     pub signed_tx_json: Option<String>,
     pub error_message: Option<String>,
     pub retry_count: i64,
+    pub intermediate_context_json: Option<String>,
     pub mined_height: Option<i64>,
     pub mined_header_hash: Option<String>,
     pub mined_timestamp: Option<i64>,
@@ -75,6 +115,7 @@ pub struct PaymentBatchUpdate<'a> {
     pub status: Option<PaymentBatchStatus>,
     pub unsigned_tx_json: Option<&'a str>,
     pub signed_tx_json: Option<&'a str>,
+    pub intermediate_context_json: Option<&'a str>,
     pub error_message: Option<&'a str>,
     pub mined_height: Option<i64>,
     pub mined_header_hash: Option<&'a str>,
@@ -96,6 +137,7 @@ impl PaymentBatch {
                 signed_tx_json,
                 error_message,
                 retry_count,
+                intermediate_context_json,
                 mined_height,
                 mined_header_hash,
                 mined_timestamp,
@@ -135,6 +177,7 @@ impl PaymentBatch {
                 signed_tx_json,
                 error_message,
                 retry_count,
+                intermediate_context_json,
                 mined_height,
                 mined_header_hash,
                 mined_timestamp,
@@ -186,6 +229,7 @@ impl PaymentBatch {
                 signed_tx_json,
                 error_message,
                 retry_count,
+                intermediate_context_json,
                 mined_height,
                 mined_header_hash,
                 mined_timestamp,
@@ -235,6 +279,14 @@ impl PaymentBatch {
             separator(&mut qb);
             qb.push("signed_tx_json = ").push_bind(json);
         }
+        if let Some(context_json) = update.intermediate_context_json {
+            separator(&mut qb);
+            if context_json.is_empty() {
+                qb.push("intermediate_context_json = NULL");
+            } else {
+                qb.push("intermediate_context_json = ").push_bind(context_json);
+            }
+        }
         if let Some(msg) = update.error_message {
             separator(&mut qb);
             qb.push("error_message = ").push_bind(msg);
@@ -251,9 +303,15 @@ impl PaymentBatch {
             separator(&mut qb);
             qb.push("mined_timestamp = ").push_bind(timestamp);
         }
+
         if increment_retry_count {
             separator(&mut qb);
             qb.push("retry_count = retry_count + 1");
+        } else if let Some(new_status) = &update.status
+            && !matches!(new_status, PaymentBatchStatus::Failed | PaymentBatchStatus::Cancelled)
+        {
+            separator(&mut qb);
+            qb.push("retry_count = 0");
         }
 
         qb.push(" WHERE id = ").push_bind(batch_id);
@@ -290,13 +348,27 @@ impl PaymentBatch {
         pool: &mut SqliteConnection,
         batch_id: &str,
         signed_tx_json: &str,
+        intermediate_context_json: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         let update = PaymentBatchUpdate {
             status: Some(PaymentBatchStatus::AwaitingBroadcast),
             signed_tx_json: Some(signed_tx_json),
+            intermediate_context_json,
             ..Default::default()
         };
         Self::update_payment_batch_status(pool, batch_id, &update, false).await
+    }
+
+    /// Updates a payment batch to 'AWAITING_BROADCAST' status for retry.
+    pub async fn update_to_awaiting_broadcast_for_retry(
+        pool: &mut SqliteConnection,
+        batch_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        let update = PaymentBatchUpdate {
+            status: Some(PaymentBatchStatus::AwaitingBroadcast),
+            ..Default::default()
+        };
+        Self::update_payment_batch_status(pool, batch_id, &update, true).await
     }
 
     /// Updates a payment batch to 'BROADCASTING' status.
@@ -315,6 +387,15 @@ impl PaymentBatch {
     ) -> Result<(), sqlx::Error> {
         let update = PaymentBatchUpdate {
             status: Some(PaymentBatchStatus::AwaitingConfirmation),
+            intermediate_context_json: Some(""),
+            ..Default::default()
+        };
+        Self::update_payment_batch_status(pool, batch_id, &update, false).await
+    }
+
+    pub async fn reset_to_pending_batching(pool: &mut SqliteConnection, batch_id: &str) -> Result<(), sqlx::Error> {
+        let update = PaymentBatchUpdate {
+            status: Some(PaymentBatchStatus::PendingBatching),
             ..Default::default()
         };
         Self::update_payment_batch_status(pool, batch_id, &update, false).await
@@ -386,6 +467,39 @@ impl PaymentBatch {
         }
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    // Internal helper used by Payment::cancel_single_payment
+    pub async fn cancel_batch_internal(tx: &mut SqliteConnection, batch_id: &str) -> Result<(), sqlx::Error> {
+        let update = PaymentBatchUpdate {
+            status: Some(PaymentBatchStatus::Cancelled),
+            ..Default::default()
+        };
+        Self::update_payment_batch_status(tx, batch_id, &update, false).await
+    }
+
+    /// Used when a payment is removed/cancelled from an active batch.
+    pub async fn recalc_batch_after_modification(
+        pool: &mut SqliteConnection,
+        batch_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        let status_pending_batching = PaymentBatchStatus::PendingBatching.to_string();
+        sqlx::query!(
+            r#"
+            UPDATE payment_batches
+            SET status = ?,
+                unsigned_tx_json = NULL,
+                signed_tx_json = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#,
+            status_pending_batching,
+            batch_id
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 }

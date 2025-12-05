@@ -83,6 +83,6 @@ CREATE TABLE payment_batches (
     -- Timestamps
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+, intermediate_context_json TEXT);
 CREATE INDEX idx_payments_status ON payments(status);
 CREATE INDEX idx_payment_batches_status ON payment_batches(status);

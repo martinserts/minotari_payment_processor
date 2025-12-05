@@ -72,6 +72,8 @@ Because the application uses structured configuration, hierarchical settings (li
     *   Example: `LISTEN_PORT="9145"`
 *   **`CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS`** (Optional): The number of confirmations required before a transaction is considered final. Defaults to `10`.
     *   Example: `CONFIRMATION_CHECKER_REQUIRED_CONFIRMATIONS="10"`
+*   **`MAX_INPUT_COUNT_PER_TX`** (Optional): The max number of UTXOs, which can be used in a single transaction. If it exceeds this amount, we do a COINJOIN. Defaults to `400`.
+    *   Example: `MAX_INPUT_COUNT_PER_TX="200"`
 
 ### Account Configuration
 
