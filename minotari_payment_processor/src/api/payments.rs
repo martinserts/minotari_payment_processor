@@ -125,6 +125,7 @@ pub async fn api_create_payment(
         &request.recipient_address,
         request.amount,
         request.payment_id,
+        None,
     )
     .await?;
 

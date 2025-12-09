@@ -159,7 +159,7 @@ pub async fn api_lock_funds(
     configuration: &configuration::Configuration,
     name: &str,
     lock_funds_request: models::LockFundsRequest,
-) -> Result<models::LockFundsResponse, Error<ApiLockFundsError>> {
+) -> Result<models::LockFundsResult, Error<ApiLockFundsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_path_name = name;
     let p_body_lock_funds_request = lock_funds_request;
@@ -193,12 +193,12 @@ pub async fn api_lock_funds(
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
             ContentType::Text => {
                 return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::LockFundsResponse`",
+                    "Received `text/plain` content type response that cannot be converted to `models::LockFundsResult`",
                 )));
             },
             ContentType::Unsupported(unknown_type) => {
                 return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::LockFundsResponse`"
+                    "Received `{unknown_type}` content type response that cannot be converted to `models::LockFundsResult`"
                 ))));
             },
         }

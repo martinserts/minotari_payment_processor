@@ -53,6 +53,7 @@ pub struct Payment {
     pub recipient_address: String,
     pub amount: i64,
     pub payment_id: Option<String>,
+    pub payref: Option<String>,
     pub failure_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -67,6 +68,7 @@ impl Payment {
         recipient_address: &str,
         amount: i64,
         payment_id: Option<String>,
+        payref: Option<String>,
     ) -> Result<Self, sqlx::Error> {
         let id = Uuid::new_v4().to_string();
         let status = PaymentStatus::Received.to_string();
@@ -74,8 +76,8 @@ impl Payment {
         sqlx::query_as!(
             Payment,
             r#"
-            INSERT INTO payments (id, client_id, account_name, status, recipient_address, amount, payment_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO payments (id, client_id, account_name, status, recipient_address, amount, payment_id, payref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING
                 id,
                 client_id,
@@ -85,6 +87,7 @@ impl Payment {
                 recipient_address,
                 amount,
                 payment_id,
+                payref,
                 failure_reason,
                 created_at as "created_at: DateTime<Utc>",
                 updated_at as "updated_at: DateTime<Utc>"
@@ -96,6 +99,7 @@ impl Payment {
             recipient_address,
             amount,
             payment_id,
+            payref
         )
         .fetch_one(pool)
         .await
@@ -117,7 +121,8 @@ impl Payment {
                 payment_id,
                 failure_reason,
                 created_at as "created_at: DateTime<Utc>",
-                updated_at as "updated_at: DateTime<Utc>"
+                updated_at as "updated_at: DateTime<Utc>",
+                payref
             FROM payments
             WHERE id = ?
             "#,
@@ -147,7 +152,8 @@ impl Payment {
                 payment_id,
                 failure_reason,
                 created_at as "created_at: DateTime<Utc>",
-                updated_at as "updated_at: DateTime<Utc>"
+                updated_at as "updated_at: DateTime<Utc>",
+                payref
             FROM payments
             WHERE client_id = ? AND account_name = ?
             "#,
@@ -174,7 +180,8 @@ impl Payment {
                 payment_id,
                 failure_reason,
                 created_at as "created_at: DateTime<Utc>",
-                updated_at as "updated_at: DateTime<Utc>"
+                updated_at as "updated_at: DateTime<Utc>",
+                payref
             FROM payments
             WHERE status = 'RECEIVED'
             LIMIT ?
@@ -224,12 +231,26 @@ impl Payment {
         Self::update_payment_status(pool, payment_ids, PaymentStatus::Batched, Some(batch_id), None).await
     }
 
-    /// Updates the status of a list of payments to 'CONFIRMED'.
-    pub async fn update_payments_to_confirmed(
+    /// Updates the status of a single payment to 'CONFIRMED' and sets the payref.
+    pub async fn update_payment_to_confirmed(
         pool: &mut SqliteConnection,
-        payment_ids: &[String],
+        payment_id: &str,
+        payref: &str,
     ) -> Result<(), sqlx::Error> {
-        Self::update_payment_status(pool, payment_ids, PaymentStatus::Confirmed, None, None).await
+        let status = PaymentStatus::Confirmed.to_string();
+        sqlx::query!(
+            r#"
+            UPDATE payments
+              SET status = ?, payref = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#,
+            status,
+            payref,
+            payment_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     /// Updates the status of a list of payments to 'FAILED' with a reason.
@@ -323,10 +344,12 @@ impl Payment {
                 payment_id,
                 failure_reason,
                 created_at as "created_at: DateTime<Utc>",
-                updated_at as "updated_at: DateTime<Utc>"
+                updated_at as "updated_at: DateTime<Utc>",
+                payref
             FROM payments
             WHERE payment_batch_id = ?
               AND status NOT IN (?, ?)
+            ORDER BY id
             "#,
             batch_id,
             status_cancelled,
@@ -356,6 +379,7 @@ impl Payment {
                 p.failure_reason,
                 p.created_at as "created_at: DateTime<Utc>",
                 p.updated_at as "updated_at: DateTime<Utc>",
+                p.payref,
                 pb.id as batch_id,
                 pb.account_name as batch_account_name,
                 pb.status as batch_status,
@@ -392,6 +416,7 @@ impl Payment {
                     failure_reason: row.failure_reason,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
+                    payref: row.payref,
                 };
                 let batch_id = row.batch_id.clone();
                 let payment_batch = batch_id.map(|_| PaymentBatch {
@@ -430,6 +455,7 @@ struct PaymentWithBatch {
     failure_reason: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    payref: Option<String>,
     batch_id: Option<String>,
     batch_account_name: Option<String>,
     batch_status: Option<String>,

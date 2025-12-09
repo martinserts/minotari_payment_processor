@@ -34,7 +34,7 @@ CREATE TABLE payments (
 
     -- Timestamps for tracking
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, payref TEXT,
 
     FOREIGN KEY (payment_batch_id) REFERENCES payment_batches(id),
     -- Ensures a client can't accidentally submit the same payment twice.

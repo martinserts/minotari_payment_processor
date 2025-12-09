@@ -173,10 +173,10 @@ async fn process_single_batch(
         let signed_json = fs::read_to_string(&output_path)
             .await
             .context("Failed to read signed transaction from output file")?;
+        let signed_tx_wrapper = SignedOneSidedTransactionResult::from_json(&signed_json)
+            .map_err(|e| anyhow!("Failed to deserialize signed tx for step {}: {}", i, e))?;
 
         if step.is_consolidation {
-            let signed_tx_wrapper = SignedOneSidedTransactionResult::from_json(&signed_json)
-                .map_err(|e| anyhow!("Failed to deserialize signed tx for step {}: {}", i, e))?;
             for output in &signed_tx_wrapper.signed_transaction.outputs {
                 let mut cloned_output = output.clone();
                 let script_key_id = TariKeyId::Derived {
