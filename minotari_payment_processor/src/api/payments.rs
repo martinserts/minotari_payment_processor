@@ -35,6 +35,8 @@ pub struct PaymentResponse {
     pub recipient_address: String,
     pub amount: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub payref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mined_height: Option<i64>,
@@ -61,6 +63,7 @@ impl PaymentResponse {
             account_name: payment.account_name,
             recipient_address: payment.recipient_address,
             amount: payment.amount,
+            payref: payment.payref,
             failure_reason: payment.failure_reason,
             mined_height,
             mined_header_hash,
@@ -125,6 +128,7 @@ pub async fn api_create_payment(
         &request.recipient_address,
         request.amount,
         request.payment_id,
+        None,
     )
     .await?;
 

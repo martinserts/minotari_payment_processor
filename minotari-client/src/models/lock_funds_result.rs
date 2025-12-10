@@ -12,7 +12,7 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LockFundsResponse {
+pub struct LockFundsResult {
     #[serde(rename = "fee_with_change")]
     pub fee_with_change: i64,
     #[serde(rename = "fee_without_change")]
@@ -25,15 +25,15 @@ pub struct LockFundsResponse {
     pub utxos: Vec<serde_json::Value>,
 }
 
-impl LockFundsResponse {
+impl LockFundsResult {
     pub fn new(
         fee_with_change: i64,
         fee_without_change: i64,
         requires_change_output: bool,
         total_value: i64,
         utxos: Vec<serde_json::Value>,
-    ) -> LockFundsResponse {
-        LockFundsResponse {
+    ) -> LockFundsResult {
+        LockFundsResult {
             fee_with_change,
             fee_without_change,
             requires_change_output,

@@ -1,6 +1,8 @@
 use anyhow::{Context, anyhow};
 use minotari_node_wallet_client::{BaseNodeWalletClient, http::Client};
 use sqlx::SqlitePool;
+use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::types::FixedHash;
 use tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult;
 use tari_transaction_components::offline_signing::models::TransactionResult;
 use tari_transaction_components::rpc::models::TxLocation;
@@ -121,6 +123,7 @@ async fn process_single_batch(
                 base_node_client,
                 batch_id,
                 &tx_query_response,
+                &signed_tx,
                 required_confirmations,
             )
             .await?
@@ -148,6 +151,7 @@ async fn handle_mined_transaction(
     base_node_client: &Client,
     batch_id: &str,
     tx_query_response: &tari_transaction_components::rpc::models::TxQueryResponse,
+    signed_tx: &SignedOneSidedTransactionResult,
     required_confirmations: u64,
 ) -> Result<(), anyhow::Error> {
     let mined_height = tx_query_response
@@ -187,9 +191,15 @@ async fn handle_mined_transaction(
 
         let mut tx = db_pool.begin().await.context("Failed to begin DB transaction")?;
 
-        PaymentBatch::update_to_confirmed(&mut tx, batch_id, mined_height, mined_header_hash, mined_timestamp)
-            .await
-            .context("Failed to update batch to Confirmed")?;
+        PaymentBatch::update_to_confirmed(
+            &mut tx,
+            batch_id,
+            mined_height,
+            mined_header_hash.clone(),
+            mined_timestamp,
+        )
+        .await
+        .context("Failed to update batch to Confirmed")?;
 
         let associated_payments = Payment::find_by_batch_id(&mut tx, batch_id)
             .await
@@ -201,12 +211,19 @@ async fn handle_mined_transaction(
             associated_payments.len()
         );
 
-        let payment_ids: Vec<String> = associated_payments.iter().map(|p| p.id.clone()).collect();
+        let sent_hashes = &signed_tx.signed_transaction.sent_hashes;
+        anyhow::ensure!(
+            associated_payments.len() == sent_hashes.len(),
+            "Mismatch between associated payments count ({}) and sent hashes count ({})",
+            associated_payments.len(),
+            sent_hashes.len()
+        );
 
-        Payment::update_payments_to_confirmed(&mut tx, &payment_ids)
-            .await
-            .context("Failed to update payments to Confirmed")?;
-
+        let mined_header_hash = FixedHash::try_from(mined_header_hash)?;
+        for (payment, sent_hash) in associated_payments.iter().zip(sent_hashes) {
+            let payref = hex::encode(generate_payment_reference(&mined_header_hash, sent_hash));
+            Payment::update_payment_to_confirmed(&mut tx, &payment.id, &payref).await?;
+        }
         tx.commit().await.context("Failed to commit DB transaction")?;
 
         println!("INFO: Batch {} confirmed successfully and DB updated.", batch_id);
