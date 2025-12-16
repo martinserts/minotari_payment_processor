@@ -164,6 +164,46 @@ impl Payment {
         .await
     }
 
+    /// Retrieves multiple payments by a list of client_ids for a specific account.
+    /// Used for bulk batch idempotency checks.
+    pub async fn find_by_client_ids(
+        pool: &mut SqliteConnection,
+        client_ids: &[String],
+        account_name: &str,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        if client_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let json = serde_json::to_string(client_ids).unwrap();
+
+        sqlx::query_as!(
+            Payment,
+            r#"
+            SELECT
+                id,
+                client_id,
+                account_name,
+                status,
+                payment_batch_id,
+                recipient_address,
+                amount,
+                payment_id,
+                failure_reason,
+                created_at as "created_at: DateTime<Utc>",
+                updated_at as "updated_at: DateTime<Utc>",
+                payref
+            FROM payments
+            WHERE account_name = ?
+              AND client_id IN (SELECT value FROM json_each(?))
+            "#,
+            account_name,
+            json
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     /// Finds payments with status 'RECEIVED' for batching.
     pub async fn find_receivable_payments(pool: &mut SqliteConnection, limit: i64) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as!(
