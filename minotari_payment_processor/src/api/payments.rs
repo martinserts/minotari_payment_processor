@@ -276,14 +276,11 @@ pub async fn api_create_payment_batch(
 
     tx.commit().await?;
 
-    let response_payments: Vec<PaymentResponse> = created_payments
-        .into_iter()
-        .map(|mut p| {
-            p.status = PaymentStatus::Batched;
-            p.payment_batch_id = Some(batch.id.clone());
-            PaymentResponse::from(p)
-        })
-        .collect();
+    for p in &mut created_payments {
+        p.status = PaymentStatus::Batched;
+        p.payment_batch_id = Some(batch.id.clone());
+    }
+    let response_payments: Vec<PaymentResponse> = created_payments.into_iter().map(PaymentResponse::from).collect();
 
     let response = BulkPaymentResponse {
         batch_id: batch.id,
