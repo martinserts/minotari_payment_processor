@@ -175,7 +175,7 @@ impl Payment {
             return Ok(vec![]);
         }
 
-        let json = serde_json::to_string(client_ids).unwrap();
+        let json = serde_json::to_string(client_ids).map_err(|e| sqlx::Error::Configuration(Box::new(e)))?;
 
         sqlx::query_as!(
             Payment,
@@ -240,7 +240,7 @@ impl Payment {
         payment_batch_id: Option<&str>,
         failure_reason: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        let json = serde_json::to_string(payment_ids).unwrap();
+        let json = serde_json::to_string(payment_ids).map_err(|e| sqlx::Error::Configuration(Box::new(e)))?;
         let status = status.to_string();
         sqlx::query!(
             r#"
