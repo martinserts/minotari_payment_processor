@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountBalance {
+    /// The portion of the total balance that is currently spendable.
+    #[serde(rename = "available")]
+    pub available: i64,
+    /// The portion of the balance that is locked.
+    #[serde(rename = "locked")]
+    pub locked: i64,
+    /// The timestamp of the most recent transaction.  The string is in ISO 8601 format. Will be `None` if the account has no transactions.
     #[serde(
         rename = "max_date",
         default,
@@ -20,6 +27,7 @@ pub struct AccountBalance {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_date: Option<Option<String>>,
+    /// The maximum blockchain height among all transactions for this account.  Will be `None` if the account has no transactions.
     #[serde(
         rename = "max_height",
         default,
@@ -27,6 +35,10 @@ pub struct AccountBalance {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_height: Option<Option<i64>>,
+    /// The total balance of the account (Total Credits - Total Debits).
+    #[serde(rename = "total")]
+    pub total: i64,
+    /// The total sum of all incoming (credit) transactions.
     #[serde(
         rename = "total_credits",
         default,
@@ -34,6 +46,7 @@ pub struct AccountBalance {
         skip_serializing_if = "Option::is_none"
     )]
     pub total_credits: Option<Option<i64>>,
+    /// The total sum of all outgoing (debit) transactions.
     #[serde(
         rename = "total_debits",
         default,
@@ -41,15 +54,22 @@ pub struct AccountBalance {
         skip_serializing_if = "Option::is_none"
     )]
     pub total_debits: Option<Option<i64>>,
+    /// The amount from incoming transactions that have not yet been confirmed.
+    #[serde(rename = "unconfirmed")]
+    pub unconfirmed: i64,
 }
 
 impl AccountBalance {
-    pub fn new() -> AccountBalance {
+    pub fn new(available: i64, locked: i64, total: i64, unconfirmed: i64) -> AccountBalance {
         AccountBalance {
+            available,
+            locked,
             max_date: None,
             max_height: None,
+            total,
             total_credits: None,
             total_debits: None,
+            unconfirmed,
         }
     }
 }

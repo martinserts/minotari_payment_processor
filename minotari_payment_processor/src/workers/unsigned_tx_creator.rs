@@ -178,8 +178,7 @@ async fn process_single_batch(
         let payment_total: i64 = associated_payments.iter().map(|p| p.amount).sum();
         let amount_to_lock = payment_total + FEE_BUFFER_AMOUNT;
         let account_balance = accounts_api::api_get_balance(client_config, account_name).await?;
-        let balance = account_balance.total_credits.flatten().unwrap_or_default()
-            - account_balance.total_debits.flatten().unwrap_or_default();
+        let balance = account_balance.available;
 
         if balance < amount_to_lock {
             println!(
