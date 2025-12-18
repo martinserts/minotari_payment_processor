@@ -30,6 +30,7 @@ impl FromRef<AppState> for SqlitePool {
     paths(
         version::api_get_version,
         payments::api_create_payment,
+        payments::api_create_payment_batch,
         payments::api_get_payment,
         payments::api_cancel_payment,
     ),
@@ -37,6 +38,9 @@ impl FromRef<AppState> for SqlitePool {
         schemas(
             version::ServiceVersion,
             payments::PaymentRequest,
+            payments::BulkPaymentRequest,
+            payments::BulkPaymentItem,
+            payments::BulkPaymentResponse,
             payments::PaymentResponse,
             payments::PaymentCancelResponse,
             crate::db::payment::PaymentStatus,
@@ -56,6 +60,7 @@ pub fn create_router(db_pool: SqlitePool, env: PaymentProcessorEnv) -> Router {
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/health/version", get(version::api_get_version))
         .route("/v1/payments", post(payments::api_create_payment))
+        .route("/v1/payment-batches", post(payments::api_create_payment_batch))
         .route("/v1/payments/{payment_id}", get(payments::api_get_payment))
         .route("/v1/payments/{payment_id}/cancel", post(payments::api_cancel_payment))
         .with_state(app_state)

@@ -192,7 +192,7 @@ impl PaymentBatch {
         .fetch_one(&mut *tx)
         .await?;
 
-        let json = serde_json::to_string(payment_ids).unwrap();
+        let json = serde_json::to_string(payment_ids).map_err(|e| sqlx::Error::Configuration(Box::new(e)))?;
         let status_batched = PaymentStatus::Batched.to_string();
         sqlx::query!(
             r#"

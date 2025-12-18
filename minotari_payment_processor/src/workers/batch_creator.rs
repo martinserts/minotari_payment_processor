@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use tokio::time::{self, Duration};
 use uuid::Uuid;
 
+use crate::MAX_BATCH_SIZE;
 use crate::db::{payment::Payment, payment_batch::PaymentBatch};
 
 const DEFAULT_SLEEP_SECS: u64 = 10 * 60; // 10 minutes
-const MAX_BATCH_SIZE: i64 = 100;
 
 pub async fn run(db_pool: SqlitePool, sleep_secs: Option<u64>) {
     let sleep_duration = Duration::from_secs(sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS));
@@ -34,7 +34,8 @@ pub async fn run(db_pool: SqlitePool, sleep_secs: Option<u64>) {
 async fn process_payment_cycle(db_pool: &SqlitePool) -> Result<bool, anyhow::Error> {
     let mut conn = db_pool.acquire().await.context("Failed to acquire DB connection")?;
 
-    let payments = Payment::find_receivable_payments(&mut conn, MAX_BATCH_SIZE)
+    let limit = MAX_BATCH_SIZE as i64;
+    let payments = Payment::find_receivable_payments(&mut conn, limit)
         .await
         .context("Failed to find receivable payments")?;
 
@@ -66,7 +67,7 @@ async fn process_payment_cycle(db_pool: &SqlitePool) -> Result<bool, anyhow::Err
         }
     }
 
-    Ok(payments_count == MAX_BATCH_SIZE as usize)
+    Ok(payments_count == MAX_BATCH_SIZE)
 }
 
 async fn process_account_batch(
