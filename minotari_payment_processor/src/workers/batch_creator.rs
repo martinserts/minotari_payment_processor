@@ -1,4 +1,5 @@
 use anyhow::Context;
+use log::{error, info};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use tokio::time::{self, Duration};
@@ -12,7 +13,7 @@ const DEFAULT_SLEEP_SECS: u64 = 10 * 60; // 10 minutes
 pub async fn run(db_pool: SqlitePool, sleep_secs: Option<u64>) {
     let sleep_duration = Duration::from_secs(sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS));
 
-    println!("Batch Creator worker started. Cycle interval: {:?}.", sleep_duration);
+    info!("Batch Creator worker started. Cycle interval: {:?}.", sleep_duration);
 
     loop {
         match process_payment_cycle(&db_pool).await {
@@ -20,11 +21,11 @@ pub async fn run(db_pool: SqlitePool, sleep_secs: Option<u64>) {
                 if !more_batches_expected {
                     time::sleep(sleep_duration).await;
                 } else {
-                    println!("INFO: Max batch size reached. Continuing to next cycle immediately.");
+                    info!("Max batch size reached. Continuing to next cycle immediately.");
                 }
             },
             Err(e) => {
-                eprintln!("Batch Creator worker critical error: {:?}. Sleeping...", e);
+                error!("Batch Creator worker critical error: {:?}. Sleeping...", e);
                 time::sleep(sleep_duration).await;
             },
         }
@@ -45,7 +46,7 @@ async fn process_payment_cycle(db_pool: &SqlitePool) -> Result<bool, anyhow::Err
         return Ok(false);
     }
 
-    println!("INFO: Found {} receivable payments to process.", payments_count);
+    info!("Found {} receivable payments to process.", payments_count);
 
     let mut payments_by_account: HashMap<String, Vec<Payment>> = HashMap::new();
     for payment in payments {
@@ -56,14 +57,14 @@ async fn process_payment_cycle(db_pool: &SqlitePool) -> Result<bool, anyhow::Err
     }
 
     for (account_name, account_payments) in payments_by_account {
-        println!(
-            "INFO: Processing group for account '{}' with {} payments.",
+        info!(
+            "Processing group for account '{}' with {} payments.",
             account_name,
             account_payments.len()
         );
 
         if let Err(e) = process_account_batch(db_pool, &account_name, &account_payments).await {
-            eprintln!("Failed to create batch for account '{}': {:?}", account_name, e);
+            error!("Failed to create batch for account '{}': {:?}", account_name, e);
         }
     }
 
@@ -82,8 +83,8 @@ async fn process_account_batch(
     let payment_ids: Vec<String> = payments.iter().map(|p| p.id.clone()).collect();
     let pr_idempotency_key = Uuid::new_v4().to_string();
 
-    println!(
-        "INFO: Creating batch for Account: '{}'. Idempotency Key: {}. Payment Count: {}",
+    info!(
+        "Creating batch for Account: '{}'. Idempotency Key: {}. Payment Count: {}",
         account_name,
         pr_idempotency_key,
         payments.len()
@@ -91,13 +92,19 @@ async fn process_account_batch(
 
     let mut tx = db_pool.begin().await.context("Failed to start transaction")?;
 
-    PaymentBatch::create_with_payments(&mut tx, account_name, &pr_idempotency_key, &payment_ids)
+    let batch = PaymentBatch::create_with_payments(&mut tx, account_name, &pr_idempotency_key, &payment_ids)
         .await
         .with_context(|| format!("Failed to create batch entry for account {}", account_name))?;
 
     tx.commit().await.context("Failed to commit batch transaction")?;
 
-    println!("INFO: Successfully committed batch for Account: '{}'.", account_name);
+    info!(
+        target: "audit",
+        "Batch Created Successfully. BatchID: {}, Account: {}, Count: {}",
+        batch.id,
+        account_name,
+        payments.len()
+    );
 
     Ok(())
 }

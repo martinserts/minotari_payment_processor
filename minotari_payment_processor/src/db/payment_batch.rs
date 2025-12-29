@@ -1,5 +1,6 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, FromRow, SqliteConnection};
 use std::fmt;
@@ -159,6 +160,7 @@ impl PaymentBatch {
         pr_idempotency_key: &str,
         payment_ids: &[String],
     ) -> Result<Self, sqlx::Error> {
+        debug!("DB: Creating new payment batch for Account: {}", account_name);
         let mut tx = pool.begin().await?;
         let batch_id = Uuid::new_v4().to_string();
         let status = PaymentBatchStatus::PendingBatching.to_string();
@@ -208,6 +210,12 @@ impl PaymentBatch {
         .await?;
 
         tx.commit().await?;
+
+        info!(
+            target: "audit",
+            "DB: Payment Batch Created. ID: {}, Account: {}, Payments: {}",
+            batch.id, account_name, payment_ids.len()
+        );
         Ok(batch)
     }
 
@@ -251,6 +259,20 @@ impl PaymentBatch {
         update: &PaymentBatchUpdate<'_>,
         increment_retry_count: bool,
     ) -> Result<(), sqlx::Error> {
+        let status_log = update
+            .status
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "No Change".to_string());
+        let has_unsigned = update.unsigned_tx_json.is_some();
+        let has_signed = update.signed_tx_json.is_some();
+        let has_error = update.error_message.is_some();
+
+        debug!(
+            "DB: Updating Batch {}. Status: {}. Updates: [Unsigned: {}, Signed: {}, Error: {}, RetryInc: {}]",
+            batch_id, status_log, has_unsigned, has_signed, has_error, increment_retry_count
+        );
+
         let mut qb = sqlx::QueryBuilder::new("UPDATE payment_batches SET");
         let mut needs_comma = false;
 
@@ -425,6 +447,7 @@ impl PaymentBatch {
         batch_id: &str,
         error_message: &str,
     ) -> Result<(), sqlx::Error> {
+        warn!("DB: Marking Batch {} as FAILED. Reason: {}", batch_id, error_message);
         let mut tx = pool.begin().await?;
 
         let update = PaymentBatchUpdate {
@@ -436,6 +459,8 @@ impl PaymentBatch {
         Payment::fail_payments_in_batch(&mut tx, batch_id, error_message).await?;
 
         tx.commit().await?;
+
+        info!(target: "audit", "DB: Batch {} FAILED. Reason: {}", batch_id, error_message);
         Ok(())
     }
 
@@ -452,6 +477,10 @@ impl PaymentBatch {
             .ok_or_else(|| sqlx::Error::RowNotFound)?;
 
         if batch.retry_count + 1 >= MAX_RETRIES {
+            warn!(
+                "DB: Batch {} reached MAX retries ({}). Marking FAILED.",
+                batch_id, MAX_RETRIES
+            );
             let status_failed = PaymentBatchStatus::Failed;
             let update = PaymentBatchUpdate {
                 status: Some(status_failed),
@@ -460,8 +489,16 @@ impl PaymentBatch {
             };
             Self::update_payment_batch_status(&mut tx, batch_id, &update, false).await?;
             Payment::fail_payments_in_batch(&mut tx, batch_id, error_message).await?;
+
+            info!(target: "audit", "DB: Batch {} FAILED after {} retries. Last Error: {}", batch_id, MAX_RETRIES, error_message);
         } else {
             // No fields to update other than incrementing retry_count.
+            debug!(
+                "DB: Batch {} incrementing retry count to {}. Error: {}",
+                batch_id,
+                batch.retry_count + 1,
+                error_message
+            );
             let update = PaymentBatchUpdate::default();
             Self::update_payment_batch_status(&mut tx, batch_id, &update, true).await?;
         }
@@ -472,6 +509,7 @@ impl PaymentBatch {
 
     // Internal helper used by Payment::cancel_single_payment
     pub async fn cancel_batch_internal(tx: &mut SqliteConnection, batch_id: &str) -> Result<(), sqlx::Error> {
+        info!(target: "audit", "DB: Cancelling Batch {} (Empty batch after payment cancellation)", batch_id);
         let update = PaymentBatchUpdate {
             status: Some(PaymentBatchStatus::Cancelled),
             ..Default::default()
@@ -484,6 +522,10 @@ impl PaymentBatch {
         pool: &mut SqliteConnection,
         batch_id: &str,
     ) -> Result<(), sqlx::Error> {
+        debug!(
+            "DB: Recalculating Batch {} status after modification (Reverting to PendingBatching).",
+            batch_id
+        );
         let status_pending_batching = PaymentBatchStatus::PendingBatching.to_string();
         sqlx::query!(
             r#"

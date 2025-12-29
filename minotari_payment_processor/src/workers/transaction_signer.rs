@@ -1,11 +1,11 @@
 use anyhow::{Context, anyhow};
+use log::{debug, error, info};
 use sqlx::{SqliteConnection, SqlitePool};
 use std::io::Write;
 use tari_common::configuration::Network;
 use tari_transaction_components::key_manager::SerializedKeyString;
 use tari_transaction_components::key_manager::TariKeyId;
-use tari_transaction_components::offline_signing::models::SignedOneSidedTransactionResult;
-use tari_transaction_components::offline_signing::models::TransactionResult;
+use tari_transaction_components::offline_signing::models::{SignedOneSidedTransactionResult, TransactionResult};
 use tempfile::NamedTempFile;
 use tokio::fs;
 use tokio::process::Command;
@@ -26,7 +26,7 @@ pub async fn run(
     sleep_secs: Option<u64>,
 ) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
-    println!(
+    info!(
         "Transaction Signer worker started. Polling every {} seconds.",
         sleep_secs
     );
@@ -44,7 +44,7 @@ pub async fn run(
         )
         .await
         {
-            eprintln!("Transaction Signer worker error: {:?}", e);
+            error!("Transaction Signer worker error: {:?}", e);
         }
     }
 }
@@ -61,7 +61,7 @@ async fn process_transactions_to_sign(
     let batches = PaymentBatch::find_by_status(&mut conn, PaymentBatchStatus::AwaitingSignature).await?;
 
     if !batches.is_empty() {
-        println!("INFO: Found {} batches awaiting signature.", batches.len());
+        info!("Found {} batches awaiting signature.", batches.len());
     }
 
     for batch in batches {
@@ -76,7 +76,7 @@ async fn process_transactions_to_sign(
         .await
         {
             let error_message = format!("{:#}", e);
-            eprintln!(
+            error!(
                 "Error signing batch {}: {}. Attempting to revert status...",
                 batch.id, error_message
             );
@@ -88,15 +88,12 @@ async fn process_transactions_to_sign(
             };
 
             match revert_result {
-                Ok(_) => println!("INFO: Batch {} reverted to 'AwaitingSignature'.", batch.id),
-                Err(revert_e) => eprintln!("CRITICAL: Failed to revert batch {} status: {:?}", batch.id, revert_e),
+                Ok(_) => info!("Batch {} reverted to 'AwaitingSignature'.", batch.id),
+                Err(revert_e) => error!("Failed to revert batch {} status: {:?}", batch.id, revert_e),
             }
 
             if let Err(db_err) = PaymentBatch::increment_retry_count(&mut conn, &batch.id, &error_message).await {
-                eprintln!(
-                    "CRITICAL: Failed to update retry count for batch {}: {:?}",
-                    batch.id, db_err
-                );
+                error!("Failed to update retry count for batch {}: {:?}", batch.id, db_err);
             }
         }
     }
@@ -113,13 +110,13 @@ async fn process_single_batch(
     batch: &PaymentBatch,
 ) -> Result<(), anyhow::Error> {
     let batch_id = &batch.id;
-    println!("INFO: Starting processing for Batch ID: {}", batch_id);
+    info!("Starting processing for Batch ID: {}", batch_id);
 
     PaymentBatch::update_to_signing_in_progress(conn, batch_id)
         .await
         .context("Failed to update status to SigningInProgress")?;
 
-    println!("INFO: Batch {}: Status updated to 'SigningInProgress'.", batch_id);
+    info!("Batch {}: Status updated to 'SigningInProgress'.", batch_id);
 
     let unsigned_json_str = batch
         .unsigned_tx_json
@@ -129,12 +126,12 @@ async fn process_single_batch(
     let mut payload = BatchPayload::from_json(&unsigned_json_str)?;
     let steps_count = payload.steps.len();
 
-    println!("INFO: Batch {}: Found {} steps to sign.", batch_id, payload.steps.len());
+    info!("Batch {}: Found {} steps to sign.", batch_id, payload.steps.len());
 
     let mut consolidated_wallet_outputs = vec![];
     for (i, step) in payload.steps.iter_mut().enumerate() {
-        println!(
-            "INFO: Batch {}: Signing Step {}/{} (ID: {})",
+        info!(
+            "Batch {}: Signing Step {}/{} (ID: {})",
             batch_id,
             i + 1,
             steps_count,
@@ -190,7 +187,7 @@ async fn process_single_batch(
         step.payload = StepPayload::Signed(signed_json);
     }
 
-    println!("INFO: Batch {}: All steps signed successfully.", batch_id);
+    info!("Batch {}: All steps signed successfully.", batch_id);
 
     let intermediate_context = if consolidated_wallet_outputs.is_empty() {
         None
@@ -206,8 +203,9 @@ async fn process_single_batch(
         .await
         .context("Failed to update status to AwaitingBroadcast")?;
 
-    println!(
-        "INFO: Batch {}: Status updated to 'AwaitingBroadcast'. Processing complete.",
+    info!(
+        target: "audit",
+        "Batch {}: Signing complete. Status updated to 'AwaitingBroadcast'.",
         batch_id
     );
 
@@ -248,7 +246,7 @@ async fn sign_with_cli(
             .join(" ")
     );
 
-    println!("DEBUG: Executing Command: {}", command_string);
+    debug!("Executing Command: {}", command_string);
 
     let cmd_output = cmd.output().await.context("Failed to execute console wallet command")?;
 
@@ -264,7 +262,7 @@ async fn sign_with_cli(
     } else {
         let stdout = String::from_utf8_lossy(&cmd_output.stdout);
         if !stdout.trim().is_empty() {
-            println!("DEBUG: CLI Stdout: {}", stdout);
+            debug!("CLI Stdout: {}", stdout);
         }
     }
 

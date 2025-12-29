@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use sqlx::Connection;
 use sqlx::{FromRow, SqliteConnection};
@@ -7,6 +8,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::db::payment_batch::{PaymentBatch, PaymentBatchStatus};
+use crate::utils::log::{mask_amount, mask_string};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -70,10 +72,16 @@ impl Payment {
         payment_id: Option<String>,
         payref: Option<String>,
     ) -> Result<Self, sqlx::Error> {
+        debug!(
+            "DB: Creating Payment. ClientID: {}, Account: {}, Amount: {}",
+            client_id,
+            account_name,
+            mask_amount(amount)
+        );
         let id = Uuid::new_v4().to_string();
         let status = PaymentStatus::Received.to_string();
 
-        sqlx::query_as!(
+        let payment = sqlx::query_as!(
             Payment,
             r#"
             INSERT INTO payments (id, client_id, account_name, status, recipient_address, amount, payment_id, payref)
@@ -102,7 +110,17 @@ impl Payment {
             payref
         )
         .fetch_one(pool)
-        .await
+        .await?;
+
+        info!(
+            target: "audit",
+            "DB: Payment Created. ID: {}, Recipient: {}, Amount: {}",
+            payment.id,
+            mask_string(&payment.recipient_address),
+            mask_amount(payment.amount)
+        );
+
+        Ok(payment)
     }
 
     /// Retrieves a payment by its ID.
@@ -240,8 +258,9 @@ impl Payment {
         payment_batch_id: Option<&str>,
         failure_reason: Option<&str>,
     ) -> Result<(), sqlx::Error> {
+        debug!("DB: Updating status for {} payments to {:?}", payment_ids.len(), status);
         let json = serde_json::to_string(payment_ids).map_err(|e| sqlx::Error::Configuration(Box::new(e)))?;
-        let status = status.to_string();
+        let status_str = status.to_string();
         sqlx::query!(
             r#"
             UPDATE payments
@@ -252,7 +271,7 @@ impl Payment {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id IN (SELECT value FROM json_each(?))
             "#,
-            status,
+            status_str,
             payment_batch_id,
             failure_reason,
             json,
@@ -277,6 +296,7 @@ impl Payment {
         payment_id: &str,
         payref: &str,
     ) -> Result<(), sqlx::Error> {
+        info!(target: "audit", "DB: Payment {} CONFIRMED. PayRef: {}", payment_id, payref);
         let status = PaymentStatus::Confirmed.to_string();
         sqlx::query!(
             r#"
@@ -299,11 +319,17 @@ impl Payment {
         payment_ids: &[String],
         reason: &str,
     ) -> Result<(), sqlx::Error> {
+        warn!(
+            "DB: Marking {} payments as FAILED. Reason: {}",
+            payment_ids.len(),
+            reason
+        );
         Self::update_payment_status(pool, payment_ids, PaymentStatus::Failed, None, Some(reason)).await
     }
 
     /// Updates the status of a payment to 'CANCELLED'.
     pub async fn update_to_cancelled(pool: &mut SqliteConnection, payment_id: &str) -> Result<(), sqlx::Error> {
+        info!(target: "audit", "DB: Payment {} CANCELLED.", payment_id);
         Self::update_payment_status(pool, &[payment_id.to_string()], PaymentStatus::Cancelled, None, None).await
     }
 
@@ -320,12 +346,22 @@ impl Payment {
         if let Some(ref batch) = batch_opt {
             match batch.status {
                 PaymentBatchStatus::PendingBatching | PaymentBatchStatus::AwaitingSignature => {},
-                _ => return Err(anyhow::anyhow!("Batch is too far along to cancel payment")),
+                _ => {
+                    warn!(
+                        "DB: Attempted to cancel payment {} but batch {} is in status {:?}",
+                        payment_id, batch.id, batch.status
+                    );
+                    return Err(anyhow::anyhow!("Batch is too far along to cancel payment"));
+                },
             }
         } else if matches!(
             payment.status,
             PaymentStatus::Confirmed | PaymentStatus::Failed | PaymentStatus::Cancelled
         ) {
+            warn!(
+                "DB: Attempted to cancel payment {} which is already in status {:?}",
+                payment_id, payment.status
+            );
             return Err(anyhow::anyhow!("Payment is already in final state"));
         }
 
@@ -350,6 +386,7 @@ impl Payment {
         batch_id: &str,
         reason: &str,
     ) -> Result<(), sqlx::Error> {
+        warn!("DB: Failing all payments in batch {}. Reason: {}", batch_id, reason);
         let status_failed = PaymentStatus::Failed.to_string();
         sqlx::query!(
             r#"
