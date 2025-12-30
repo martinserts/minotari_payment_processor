@@ -27,7 +27,7 @@ root:
 
 loggers:
   "minotari_payment_processor":
-    level: debug 
+    level: debug
 
   "audit":
     level: info
@@ -38,7 +38,7 @@ loggers:
 
   "sqlx":
     level: warn
-  
+
   "tower_http":
     level: debug
   "hyper":
