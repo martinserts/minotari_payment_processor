@@ -19,8 +19,9 @@ const DEFAULT_SLEEP_SECS: u64 = 60;
 pub async fn run(db_pool: SqlitePool, base_node_client: Client, sleep_secs: Option<u64>, required_confirmations: u64) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
     info!(
-        "Confirmation Checker worker started. Polling every {} seconds. Required Confirmations: {}",
-        sleep_secs, required_confirmations
+        interval = sleep_secs,
+        required_confirmations = required_confirmations;
+        "Confirmation Checker worker started"
     );
 
     let mut interval = time::interval(Duration::from_secs(sleep_secs));
@@ -28,7 +29,10 @@ pub async fn run(db_pool: SqlitePool, base_node_client: Client, sleep_secs: Opti
     loop {
         interval.tick().await;
         if let Err(e) = check_transaction_confirmations(&db_pool, &base_node_client, required_confirmations).await {
-            error!("Confirmation Checker worker error: {:?}", e);
+            error!(
+                error:? = e;
+                "Confirmation Checker worker error"
+            );
         }
     }
 }
@@ -43,19 +47,27 @@ async fn check_transaction_confirmations(
     let batches = PaymentBatch::find_by_status(&mut conn, PaymentBatchStatus::AwaitingConfirmation).await?;
 
     if !batches.is_empty() {
-        info!("Found {} batches awaiting confirmation.", batches.len());
+        info!(
+            count = batches.len();
+            "Found batches awaiting confirmation"
+        );
     }
 
     for batch in batches {
         if let Err(e) = process_single_batch(db_pool, base_node_client, &batch, required_confirmations).await {
             let error_message = e.to_string();
             error!(
-                "Error checking confirmation for batch {}: {}. Incrementing retry count.",
-                batch.id, error_message
+                batch_id = &*batch.id,
+                error = &*error_message;
+                "Error checking confirmation for batch. Incrementing retry count."
             );
 
             if let Err(db_err) = PaymentBatch::increment_retry_count(&mut conn, &batch.id, &error_message).await {
-                error!("Failed to update retry count for batch {}: {:?}", batch.id, db_err);
+                error!(
+                    batch_id = &*batch.id,
+                    error:? = db_err;
+                    "Failed to update retry count for batch"
+                );
             }
         }
     }
@@ -71,7 +83,7 @@ async fn process_single_batch(
 ) -> Result<(), anyhow::Error> {
     let batch_id = &batch.id;
 
-    info!("Checking status for Batch ID: {}", batch_id);
+    info!(batch_id = batch_id.as_str(); "Checking status for Batch");
 
     let payload = match &batch.signed_tx_json {
         Some(payload) => BatchPayload::from_json(payload)?,
@@ -99,9 +111,9 @@ async fn process_single_batch(
     let excess_sig_sig = kernel.excess_sig.get_signature().to_vec();
 
     debug!(
-        "Batch {}: Querying Base Node for Kernel Signature (Nonce start: {:?})",
-        batch_id,
-        &excess_sig_nonce[0..4]
+        batch_id = batch_id.as_str(),
+        nonce_preview:? = &excess_sig_nonce[0..4];
+        "Querying Base Node for Kernel Signature"
     );
 
     let tx_query_response = base_node_client
@@ -111,7 +123,7 @@ async fn process_single_batch(
 
     match tx_query_response.location {
         TxLocation::Mined => {
-            info!("Batch {}: Location 'Mined'. Processing confirmations...", batch_id);
+            info!(batch_id = batch_id.as_str(); "Location 'Mined'. Processing confirmations...");
             handle_mined_transaction(
                 db_pool,
                 base_node_client,
@@ -123,12 +135,13 @@ async fn process_single_batch(
             .await?
         },
         TxLocation::InMempool => {
-            info!("Batch {} is currently in the mempool, awaiting mining.", batch_id);
+            info!(batch_id = batch_id.as_str(); "Batch is currently in the mempool, awaiting mining.");
         },
         TxLocation::None | TxLocation::NotStored => {
             warn!(
-                "Batch {} location returned as '{:?}'.",
-                batch_id, tx_query_response.location
+                batch_id = batch_id.as_str(),
+                location:? = tx_query_response.location;
+                "Batch location returned as Not Found/None"
             );
             return Err(anyhow!(
                 "Transaction not found on Base Node (Location: {:?}). It may have been dropped or reorged.",
@@ -165,12 +178,16 @@ async fn handle_mined_transaction(
     let confirmations = best_block_height.saturating_sub(mined_height) + 1;
 
     info!(
-        "Batch {}: Mined Height: {}, Tip Height: {}, Confirmations: {}/{}",
-        batch_id, mined_height, best_block_height, confirmations, required_confirmations
+        batch_id = batch_id,
+        mined_height = mined_height,
+        tip_height = best_block_height,
+        confirmations = confirmations,
+        required = required_confirmations;
+        "Batch Confirmation Status"
     );
 
     if confirmations >= required_confirmations {
-        info!("Batch {}: Confirmation threshold reached. Finalizing...", batch_id);
+        info!(batch_id = batch_id; "Confirmation threshold reached. Finalizing...");
 
         let mined_header_hash = tx_query_response
             .mined_header_hash
@@ -197,9 +214,9 @@ async fn handle_mined_transaction(
             .context("Failed to fetch associated payments")?;
 
         info!(
-            "Batch {}: Marking {} associated payments as confirmed.",
-            batch_id,
-            associated_payments.len()
+            batch_id = batch_id,
+            count = associated_payments.len();
+            "Marking associated payments as confirmed"
         );
 
         let sent_hashes = &signed_tx.signed_transaction.sent_hashes;
@@ -219,13 +236,17 @@ async fn handle_mined_transaction(
 
         info!(
             target: "audit",
-            "Batch {} successfully CONFIRMED. Height: {}, Timestamp: {}",
-            batch_id, mined_height, mined_timestamp
+            batch_id = batch_id,
+            height = mined_height,
+            timestamp = mined_timestamp;
+            "Batch successfully CONFIRMED"
         );
     } else {
         info!(
-            "Batch {} awaiting more confirmations. (Current: {}, Required: {})",
-            batch_id, confirmations, required_confirmations
+            batch_id = batch_id,
+            current = confirmations,
+            required = required_confirmations;
+            "Batch awaiting more confirmations"
         );
     }
 

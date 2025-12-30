@@ -10,8 +10,8 @@ chrono = "0.4.42"
 config = "0.15.19"
 dotenv = "0.15.0"
 hex = "0.4.3"
-log = "0.4.29"
-log4rs = { version = "1.4.0", features = ["yaml_format", "console_appender", "file_appender"] }
+log = { version = "0.4.29", features = ["kv"] }
+log4rs = { version = "1.4.0", features = ["yaml_format", "console_appender", "file_appender", "log_kv"] }
 minotari-client = { path = "../minotari-client" }
 
 minotari_node_wallet_client  = { git = "https://github.com/tari-project/tari/", rev = "9406e482007ac8b8c63db8b76fd8fd92d244ca09" }

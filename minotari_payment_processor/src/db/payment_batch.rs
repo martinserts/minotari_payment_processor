@@ -160,7 +160,10 @@ impl PaymentBatch {
         pr_idempotency_key: &str,
         payment_ids: &[String],
     ) -> Result<Self, sqlx::Error> {
-        debug!("DB: Creating new payment batch for Account: {}", account_name);
+        debug!(
+            account = account_name;
+            "DB: Creating new payment batch"
+        );
         let mut tx = pool.begin().await?;
         let batch_id = Uuid::new_v4().to_string();
         let status = PaymentBatchStatus::PendingBatching.to_string();
@@ -213,8 +216,10 @@ impl PaymentBatch {
 
         info!(
             target: "audit",
-            "DB: Payment Batch Created. ID: {}, Account: {}, Payments: {}",
-            batch.id, account_name, payment_ids.len()
+            batch_id = &*batch.id,
+            account = account_name,
+            count = payment_ids.len();
+            "DB: Payment Batch Created"
         );
         Ok(batch)
     }
@@ -269,8 +274,13 @@ impl PaymentBatch {
         let has_error = update.error_message.is_some();
 
         debug!(
-            "DB: Updating Batch {}. Status: {}. Updates: [Unsigned: {}, Signed: {}, Error: {}, RetryInc: {}]",
-            batch_id, status_log, has_unsigned, has_signed, has_error, increment_retry_count
+            batch_id = batch_id,
+            status = &*status_log,
+            has_unsigned = has_unsigned,
+            has_signed = has_signed,
+            has_error = has_error,
+            increment_retry_count = increment_retry_count;
+            "DB: Updating Batch"
         );
 
         let mut qb = sqlx::QueryBuilder::new("UPDATE payment_batches SET");
@@ -447,7 +457,11 @@ impl PaymentBatch {
         batch_id: &str,
         error_message: &str,
     ) -> Result<(), sqlx::Error> {
-        warn!("DB: Marking Batch {} as FAILED. Reason: {}", batch_id, error_message);
+        warn!(
+            batch_id = batch_id,
+            reason = error_message;
+            "DB: Marking Batch as FAILED"
+        );
         let mut tx = pool.begin().await?;
 
         let update = PaymentBatchUpdate {
@@ -460,7 +474,12 @@ impl PaymentBatch {
 
         tx.commit().await?;
 
-        info!(target: "audit", "DB: Batch {} FAILED. Reason: {}", batch_id, error_message);
+        info!(
+            target: "audit",
+            batch_id = batch_id,
+            reason = error_message;
+            "DB: Batch FAILED"
+        );
         Ok(())
     }
 
@@ -478,8 +497,9 @@ impl PaymentBatch {
 
         if batch.retry_count + 1 >= MAX_RETRIES {
             warn!(
-                "DB: Batch {} reached MAX retries ({}). Marking FAILED.",
-                batch_id, MAX_RETRIES
+                batch_id = batch_id,
+                max_retries = MAX_RETRIES;
+                "DB: Batch reached MAX retries. Marking FAILED."
             );
             let status_failed = PaymentBatchStatus::Failed;
             let update = PaymentBatchUpdate {
@@ -490,14 +510,20 @@ impl PaymentBatch {
             Self::update_payment_batch_status(&mut tx, batch_id, &update, false).await?;
             Payment::fail_payments_in_batch(&mut tx, batch_id, error_message).await?;
 
-            info!(target: "audit", "DB: Batch {} FAILED after {} retries. Last Error: {}", batch_id, MAX_RETRIES, error_message);
+            info!(
+                target: "audit",
+                batch_id = batch_id,
+                retries = MAX_RETRIES,
+                error = error_message;
+                "DB: Batch FAILED after retries"
+            );
         } else {
             // No fields to update other than incrementing retry_count.
             debug!(
-                "DB: Batch {} incrementing retry count to {}. Error: {}",
-                batch_id,
-                batch.retry_count + 1,
-                error_message
+                batch_id = batch_id,
+                new_count = batch.retry_count + 1,
+                error = error_message;
+                "DB: Batch incrementing retry count"
             );
             let update = PaymentBatchUpdate::default();
             Self::update_payment_batch_status(&mut tx, batch_id, &update, true).await?;
@@ -509,7 +535,11 @@ impl PaymentBatch {
 
     // Internal helper used by Payment::cancel_single_payment
     pub async fn cancel_batch_internal(tx: &mut SqliteConnection, batch_id: &str) -> Result<(), sqlx::Error> {
-        info!(target: "audit", "DB: Cancelling Batch {} (Empty batch after payment cancellation)", batch_id);
+        info!(
+            target: "audit",
+            batch_id = batch_id;
+            "DB: Cancelling Batch (Empty batch after payment cancellation)"
+        );
         let update = PaymentBatchUpdate {
             status: Some(PaymentBatchStatus::Cancelled),
             ..Default::default()
@@ -523,8 +553,8 @@ impl PaymentBatch {
         batch_id: &str,
     ) -> Result<(), sqlx::Error> {
         debug!(
-            "DB: Recalculating Batch {} status after modification (Reverting to PendingBatching).",
-            batch_id
+            batch_id = batch_id;
+            "DB: Recalculating Batch status after modification (Reverting to PendingBatching)."
         );
         let status_pending_batching = PaymentBatchStatus::PendingBatching.to_string();
         sqlx::query!(

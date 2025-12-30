@@ -27,8 +27,8 @@ pub async fn run(
 ) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
     info!(
-        "Transaction Signer worker started. Polling every {} seconds.",
-        sleep_secs
+        interval = sleep_secs;
+        "Transaction Signer worker started"
     );
 
     let mut interval = time::interval(Duration::from_secs(sleep_secs));
@@ -44,7 +44,10 @@ pub async fn run(
         )
         .await
         {
-            error!("Transaction Signer worker error: {:?}", e);
+            error!(
+                error:? = e;
+                "Transaction Signer worker error"
+            );
         }
     }
 }
@@ -61,7 +64,10 @@ async fn process_transactions_to_sign(
     let batches = PaymentBatch::find_by_status(&mut conn, PaymentBatchStatus::AwaitingSignature).await?;
 
     if !batches.is_empty() {
-        info!("Found {} batches awaiting signature.", batches.len());
+        info!(
+            count = batches.len();
+            "Found batches awaiting signature"
+        );
     }
 
     for batch in batches {
@@ -77,8 +83,9 @@ async fn process_transactions_to_sign(
         {
             let error_message = format!("{:#}", e);
             error!(
-                "Error signing batch {}: {}. Attempting to revert status...",
-                batch.id, error_message
+                batch_id = &*batch.id,
+                error = &*error_message;
+                "Error signing batch. Attempting to revert status..."
             );
 
             let revert_result = if let Some(json) = &batch.unsigned_tx_json {
@@ -88,12 +95,20 @@ async fn process_transactions_to_sign(
             };
 
             match revert_result {
-                Ok(_) => info!("Batch {} reverted to 'AwaitingSignature'.", batch.id),
-                Err(revert_e) => error!("Failed to revert batch {} status: {:?}", batch.id, revert_e),
+                Ok(_) => info!(batch_id = &*batch.id; "Batch reverted to 'AwaitingSignature'"),
+                Err(revert_e) => error!(
+                    batch_id = &*batch.id,
+                    error:? = revert_e;
+                    "Failed to revert batch status"
+                ),
             }
 
             if let Err(db_err) = PaymentBatch::increment_retry_count(&mut conn, &batch.id, &error_message).await {
-                error!("Failed to update retry count for batch {}: {:?}", batch.id, db_err);
+                error!(
+                    batch_id = &*batch.id,
+                    error:? = db_err;
+                    "Failed to update retry count for batch"
+                );
             }
         }
     }
@@ -110,13 +125,13 @@ async fn process_single_batch(
     batch: &PaymentBatch,
 ) -> Result<(), anyhow::Error> {
     let batch_id = &batch.id;
-    info!("Starting processing for Batch ID: {}", batch_id);
+    info!(batch_id = batch_id.as_str(); "Starting processing for Batch");
 
     PaymentBatch::update_to_signing_in_progress(conn, batch_id)
         .await
         .context("Failed to update status to SigningInProgress")?;
 
-    info!("Batch {}: Status updated to 'SigningInProgress'.", batch_id);
+    info!(batch_id = batch_id.as_str(); "Batch Status updated to 'SigningInProgress'");
 
     let unsigned_json_str = batch
         .unsigned_tx_json
@@ -126,16 +141,20 @@ async fn process_single_batch(
     let mut payload = BatchPayload::from_json(&unsigned_json_str)?;
     let steps_count = payload.steps.len();
 
-    info!("Batch {}: Found {} steps to sign.", batch_id, payload.steps.len());
+    info!(
+        batch_id = batch_id.as_str(),
+        steps = steps_count;
+        "Batch found steps to sign"
+    );
 
     let mut consolidated_wallet_outputs = vec![];
     for (i, step) in payload.steps.iter_mut().enumerate() {
         info!(
-            "Batch {}: Signing Step {}/{} (ID: {})",
-            batch_id,
-            i + 1,
-            steps_count,
-            step.tx_id
+            batch_id = batch_id.as_str(),
+            step = i + 1,
+            total = steps_count,
+            tx_id:? = step.tx_id;
+            "Signing Step"
         );
 
         let unsigned_json = match &step.payload {
@@ -187,7 +206,7 @@ async fn process_single_batch(
         step.payload = StepPayload::Signed(signed_json);
     }
 
-    info!("Batch {}: All steps signed successfully.", batch_id);
+    info!(batch_id = batch_id.as_str(); "All steps signed successfully.");
 
     let intermediate_context = if consolidated_wallet_outputs.is_empty() {
         None
@@ -205,8 +224,8 @@ async fn process_single_batch(
 
     info!(
         target: "audit",
-        "Batch {}: Signing complete. Status updated to 'AwaitingBroadcast'.",
-        batch_id
+        batch_id = batch_id.as_str();
+        "Signing complete. Status updated to 'AwaitingBroadcast'."
     );
 
     Ok(())
@@ -246,7 +265,7 @@ async fn sign_with_cli(
             .join(" ")
     );
 
-    debug!("Executing Command: {}", command_string);
+    debug!(command = &*command_string; "Executing Command");
 
     let cmd_output = cmd.output().await.context("Failed to execute console wallet command")?;
 
@@ -262,7 +281,7 @@ async fn sign_with_cli(
     } else {
         let stdout = String::from_utf8_lossy(&cmd_output.stdout);
         if !stdout.trim().is_empty() {
-            debug!("CLI Stdout: {}", stdout);
+            debug!(stdout = &*stdout; "CLI Stdout");
         }
     }
 

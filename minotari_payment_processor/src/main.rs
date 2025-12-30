@@ -67,7 +67,10 @@ async fn main() -> anyhow::Result<()> {
     let app = api::create_router(db_pool.clone(), app_env);
     let addr = format!("{}:{}", env.listen_ip, env.listen_port);
     let listener = TcpListener::bind(&addr).await?;
-    info!("Axum API server listening on {}", addr);
+    info!(
+        address = &*addr;
+        "Axum API server listening"
+    );
     tokio::spawn(async move {
         axum::serve(listener, app.into_make_service()).await.unwrap();
     });
@@ -85,7 +88,10 @@ fn init_logging() {
     if path.exists() {
         match log4rs::init_file(path, Default::default()) {
             Ok(_) => {
-                info!("Logging initialized from external configuration: {}", config_path);
+                info!(
+                    path = config_path;
+                    "Logging initialized from external configuration"
+                );
                 return;
             },
             Err(e) => {

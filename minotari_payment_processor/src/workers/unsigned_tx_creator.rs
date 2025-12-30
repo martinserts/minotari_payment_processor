@@ -46,8 +46,8 @@ pub async fn run(
 ) {
     let sleep_secs = sleep_secs.unwrap_or(DEFAULT_SLEEP_SECS);
     info!(
-        "Unsigned Transaction Creator worker started. Polling every {} seconds.",
-        sleep_secs
+        interval = sleep_secs;
+        "Unsigned Transaction Creator worker started"
     );
 
     let mut interval = time::interval(Duration::from_secs(sleep_secs));
@@ -57,7 +57,10 @@ pub async fn run(
         if let Err(e) =
             process_unsigned_transactions(&db_pool, &client_config, network, &accounts, max_input_count_per_tx).await
         {
-            error!("Unsigned Transaction Creator worker error: {:?}", e);
+            error!(
+                error:? = e;
+                "Unsigned Transaction Creator worker error"
+            );
         }
     }
 }
@@ -74,7 +77,10 @@ async fn process_unsigned_transactions(
     let batches = PaymentBatch::find_by_status(&mut conn, PaymentBatchStatus::PendingBatching).await?;
 
     if !batches.is_empty() {
-        info!("Found {} batches pending unsigned transaction creation.", batches.len());
+        info!(
+            count = batches.len();
+            "Found batches pending unsigned transaction creation"
+        );
     }
 
     for batch in batches {
@@ -90,12 +96,17 @@ async fn process_unsigned_transactions(
         {
             let error_message = e.to_string();
             error!(
-                "Error processing batch {}: {}. Incrementing retry count.",
-                batch.id, error_message
+                batch_id = &*batch.id,
+                error = &*error_message;
+                "Error processing batch. Incrementing retry count."
             );
 
             if let Err(db_err) = PaymentBatch::increment_retry_count(&mut conn, &batch.id, &error_message).await {
-                error!("Failed to update retry count for batch {}: {:?}", batch.id, db_err);
+                error!(
+                    batch_id = &*batch.id,
+                    error:? = db_err;
+                    "Failed to update retry count for batch"
+                );
             }
         }
     }
@@ -112,14 +123,14 @@ async fn process_single_batch(
     max_input_count_per_tx: usize,
 ) -> Result<(), anyhow::Error> {
     let batch_id = &batch.id;
-    info!("Starting processing for Batch ID: {}", batch_id);
+    info!(batch_id = batch_id.as_str(); "Starting processing for Batch");
 
     let associated_payments = Payment::find_by_batch_id(conn, batch_id)
         .await
         .context("Failed to fetch payments for batch")?;
 
     if associated_payments.is_empty() {
-        warn!("Batch {} has no active payments. Marking batch as CANCELLED.", batch_id);
+        warn!(batch_id = batch_id.as_str(); "Batch has no active payments. Marking batch as CANCELLED.");
         PaymentBatch::update_to_failed(conn, batch_id, "No active payments found in batch").await?;
         return Ok(());
     }
@@ -133,17 +144,17 @@ async fn process_single_batch(
     if let Some(context_json) = &batch.intermediate_context_json {
         // === CYCLE 2: FINALIZE ===
         info!(
-            "Batch {}: Found intermediate context. Executing CYCLE 2 (Finalize).",
-            batch_id
+            batch_id = batch_id.as_str();
+            "Found intermediate context. Executing CYCLE 2 (Finalize)."
         );
 
         let context = IntermediateContext::from_json(context_json)?;
         let inputs = context.utxos;
 
         info!(
-            "Batch {}: Using {} intermediate inputs for final transaction.",
-            batch_id,
-            inputs.len()
+            batch_id = batch_id.as_str(),
+            input_count = inputs.len();
+            "Using intermediate inputs for final transaction"
         );
 
         let final_step = create_transaction_step(network, sender_account, inputs, &associated_payments, 0).await?;
@@ -157,10 +168,10 @@ async fn process_single_batch(
             .await
             .context("Failed to update batch to AwaitingSignature (Cycle 2)")?;
 
-        info!("Batch {}: Cycle 2 preparation complete. Ready for signature.", batch_id);
+        info!(batch_id = batch_id.as_str(); "Cycle 2 preparation complete. Ready for signature.");
     } else {
         // === CYCLE 1: FETCH & ANALYZE ===
-        info!("Batch {}: No context found. Fetching fresh UTXOs from API.", batch_id);
+        info!(batch_id = batch_id.as_str(); "No context found. Fetching fresh UTXOs from API.");
 
         let payment_total: i64 = associated_payments.iter().map(|p| p.amount).sum();
         let amount_to_lock = payment_total + FEE_BUFFER_AMOUNT;
@@ -169,11 +180,11 @@ async fn process_single_batch(
 
         if balance < amount_to_lock {
             warn!(
-                "Batch {}: Not enough funds in wallet {}. Requested (w/ buffer): {}, Actual: {}.",
-                batch_id,
-                account_name,
-                mask_amount(amount_to_lock),
-                mask_amount(balance)
+                batch_id = batch_id.as_str(),
+                account = account_name.as_str(),
+                requested = &*mask_amount(amount_to_lock),
+                actual = &*mask_amount(balance);
+                "Not enough funds in wallet"
             );
             return Ok(());
         }
@@ -199,17 +210,18 @@ async fn process_single_batch(
 
         info!(
             target: "audit",
-            "Batch {}: Successfully locked funds. API returned {} UTXOs.",
-            batch_id, inputs.len()
+            batch_id = batch_id.as_str(),
+            input_count = inputs.len();
+            "Successfully locked funds. API returned UTXOs."
         );
 
         if inputs.len() > max_input_count_per_tx {
             // === SPLIT LOGIC ===
             info!(
-                "Batch {}: Input count ({}) exceeds limit ({}). Initiating SPLIT (CoinJoin).",
-                batch_id,
-                inputs.len(),
-                max_input_count_per_tx
+                batch_id = batch_id.as_str(),
+                input_count = inputs.len(),
+                limit = max_input_count_per_tx;
+                "Input count exceeds limit. Initiating SPLIT (CoinJoin)."
             );
 
             let chunks = inputs.chunks(max_input_count_per_tx);
@@ -228,15 +240,15 @@ async fn process_single_batch(
                 .context("Failed to update batch to AwaitingSignature (Split Cycle)")?;
 
             info!(
-                "Batch {}: Split Cycle preparation complete. {} steps created.",
-                batch_id,
-                payload.steps.len()
+                batch_id = batch_id.as_str(),
+                steps_count = payload.steps.len();
+                "Split Cycle preparation complete."
             );
         } else {
             // === NORMAL LOGIC ===
             info!(
-                "Batch {}: Input count within limits. creating standard transaction.",
-                batch_id
+                batch_id = batch_id.as_str();
+                "Input count within limits. creating standard transaction."
             );
 
             let step = create_transaction_step(network, sender_account, inputs, &associated_payments, 0).await?;
@@ -250,8 +262,8 @@ async fn process_single_batch(
 
             info!(
                 target: "audit",
-                "Batch {}: Transaction construction complete. Updated to 'AwaitingSignature'.",
-                batch_id
+                batch_id = batch_id.as_str();
+                "Transaction construction complete. Updated to 'AwaitingSignature'."
             );
         }
     }
@@ -377,12 +389,12 @@ async fn create_self_spend_step(
     let amount_to_self = total_input_value - calculated_fee;
 
     debug!(
-        "Self-Spend Step {}: Inputs Sum: {}, Inputs Count: {}, Fee: {}, Net Output: {}",
-        step_index,
-        mask_amount(total_input_value.as_u64() as i64),
-        inputs.len(),
-        mask_amount(calculated_fee.as_u64() as i64),
-        mask_amount(amount_to_self.as_u64() as i64)
+        step_index = step_index,
+        inputs_sum = &*mask_amount(total_input_value.as_u64() as i64),
+        inputs_count = inputs.len(),
+        fee = &*mask_amount(calculated_fee.as_u64() as i64),
+        net_output = &*mask_amount(amount_to_self.as_u64() as i64);
+        "Self-Spend Step"
     );
 
     let output_features = OutputFeatures::default();

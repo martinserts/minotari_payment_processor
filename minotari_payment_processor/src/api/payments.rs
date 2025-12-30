@@ -128,15 +128,18 @@ pub async fn api_create_payment(
     Json(request): Json<PaymentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     debug!(
-        "API: Create Payment Request. ClientID: {}, Account: {}, Recipient: {}, Amount: {}",
-        request.client_id,
-        request.account_name,
-        mask_string(&request.recipient_address),
-        mask_amount(request.amount)
+        client_id = &*request.client_id,
+        account = &*request.account_name,
+        recipient = &*mask_string(&request.recipient_address),
+        amount = &*mask_amount(request.amount);
+        "API: Create Payment Request"
     );
 
     if !state.env.accounts.contains_key(&request.account_name.to_lowercase()) {
-        warn!("API: Account '{}' not found in configuration", request.account_name);
+        warn!(
+            account = &*request.account_name;
+            "API: Account not found in configuration"
+        );
         return Err(ApiError::BadRequest(format!(
             "Account '{}' not found in configuration",
             request.account_name
@@ -145,8 +148,9 @@ pub async fn api_create_payment(
 
     if request.amount <= 0 {
         warn!(
-            "API: Invalid amount for ClientID {}: {}",
-            request.client_id, request.amount
+            client_id = &*request.client_id,
+            amount = request.amount;
+            "API: Invalid amount for ClientID"
         );
         return Err(ApiError::BadRequest("Amount must be positive".to_string()));
     }
@@ -158,10 +162,10 @@ pub async fn api_create_payment(
     {
         info!(
             target: "audit",
-            "Idempotent payment request matched. ClientID: {}, PaymentID: {}, Status: {:?}",
-            existing_payment.client_id,
-            existing_payment.id,
-            existing_payment.status
+            client_id = &*existing_payment.client_id,
+            payment_id = &*existing_payment.id,
+            status = &*existing_payment.status.to_string();
+            "Idempotent payment request matched"
         );
         transaction.commit().await?;
         return Ok((StatusCode::OK, Json(PaymentResponse::from(existing_payment))));
@@ -182,11 +186,11 @@ pub async fn api_create_payment(
 
     info!(
         target: "audit",
-        "Payment Created. ID: {}, ClientID: {}, Account: {}, Recipient: {}",
-        new_payment.id,
-        new_payment.client_id,
-        new_payment.account_name,
-        mask_string(&new_payment.recipient_address)
+        payment_id = &*new_payment.id,
+        client_id = &*new_payment.client_id,
+        account = &*new_payment.account_name,
+        recipient = &*mask_string(&new_payment.recipient_address);
+        "Payment Created"
     );
 
     Ok((StatusCode::ACCEPTED, Json(PaymentResponse::from(new_payment))))
@@ -208,13 +212,16 @@ pub async fn api_create_payment_batch(
     Json(request): Json<BulkPaymentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     debug!(
-        "API: Create Bulk Payment Batch. Account: {}, Item Count: {}",
-        request.account_name,
-        request.items.len()
+        account = &*request.account_name,
+        item_count = request.items.len();
+        "API: Create Bulk Payment Batch"
     );
 
     if !state.env.accounts.contains_key(&request.account_name.to_lowercase()) {
-        warn!("API: Account '{}' not found in configuration", request.account_name);
+        warn!(
+            account = &*request.account_name;
+            "API: Account not found in configuration"
+        );
         return Err(ApiError::BadRequest(format!(
             "Account '{}' not found in configuration",
             request.account_name
@@ -222,16 +229,19 @@ pub async fn api_create_payment_batch(
     }
 
     if request.items.is_empty() {
-        warn!("API: Empty batch request for Account: {}", request.account_name);
+        warn!(
+            account = &*request.account_name;
+            "API: Empty batch request"
+        );
         return Err(ApiError::BadRequest("Batch cannot be empty".to_string()));
     }
 
     if request.items.len() > MAX_BATCH_SIZE {
         warn!(
-            "API: Batch size {} exceeds limit {} for Account: {}",
-            request.items.len(),
-            MAX_BATCH_SIZE,
-            request.account_name
+            count = request.items.len(),
+            limit = MAX_BATCH_SIZE,
+            account = &*request.account_name;
+            "API: Batch size exceeds limit"
         );
         return Err(ApiError::BadRequest(format!(
             "Batch size exceeds limit of {}",
@@ -241,7 +251,11 @@ pub async fn api_create_payment_batch(
 
     for (idx, item) in request.items.iter().enumerate() {
         if item.amount <= 0 {
-            warn!("API: Batch item {} has invalid amount: {}", idx, item.amount);
+            warn!(
+                index = idx,
+                amount = item.amount;
+                "API: Batch item has invalid amount"
+            );
             return Err(ApiError::BadRequest(format!(
                 "Item at index {} has invalid amount",
                 idx
@@ -256,7 +270,6 @@ pub async fn api_create_payment_batch(
 
     if existing_payments.len() == request.items.len() {
         let first_batch_id = existing_payments[0].payment_batch_id.clone();
-
         let all_same_batch = existing_payments.iter().all(|p| p.payment_batch_id == first_batch_id);
 
         if let (true, Some(batch_id)) = (all_same_batch, first_batch_id) {
@@ -276,16 +289,16 @@ pub async fn api_create_payment_batch(
 
             info!(
                 target: "audit",
-                "Idempotent batch request matched. BatchID: {}, ItemCount: {}",
-                response.batch_id,
-                request.items.len()
+                batch_id = &*response.batch_id,
+                item_count = request.items.len();
+                "Idempotent batch request matched"
             );
             tx.commit().await?;
             return Ok((StatusCode::OK, Json(response)));
         } else {
             warn!(
-                "API: Duplicate payments found for account {}, but inconsistent batch state.",
-                request.account_name
+                account = &*request.account_name;
+                "API: Duplicate payments found for account, but inconsistent batch state."
             );
             return Err(ApiError::BadRequest(
                 "Duplicate payments found, but they do not form a single consistent batch.".to_string(),
@@ -295,10 +308,10 @@ pub async fn api_create_payment_batch(
 
     if !existing_payments.is_empty() {
         warn!(
-            "API: Partial duplicate batch request. Account: {}. Existing: {}/{}.",
-            request.account_name,
-            existing_payments.len(),
-            request.items.len()
+            account = &*request.account_name,
+            existing_count = existing_payments.len(),
+            request_count = request.items.len();
+            "API: Partial duplicate batch request"
         );
         return Err(ApiError::BadRequest(format!(
             "Request contains {} duplicate client_ids (out of {}). Partial batches are not allowed.",
@@ -346,10 +359,10 @@ pub async fn api_create_payment_batch(
 
     info!(
         target: "audit",
-        "Batch Created. BatchID: {}, Account: {}, ItemCount: {}",
-        batch.id,
-        batch.account_name,
-        response_payments.len()
+        batch_id = &*batch.id,
+        account = &*batch.account_name,
+        item_count = response_payments.len();
+        "Batch Created"
     );
 
     let response = BulkPaymentResponse {
@@ -378,13 +391,19 @@ pub async fn api_get_payment(
     State(db_pool): State<SqlitePool>,
     Path(payment_id): Path<String>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    debug!("API: Get Payment Status. PaymentID: {}", payment_id);
+    debug!(
+        payment_id = &*payment_id;
+        "API: Get Payment Status"
+    );
     let mut conn = db_pool.acquire().await?;
 
     let (payment, payment_batch) = Payment::get_by_id_with_batch_info(&mut conn, &payment_id)
         .await?
         .ok_or_else(|| {
-            debug!("API: Payment not found. PaymentID: {}", payment_id);
+            debug!(
+                payment_id = &*payment_id;
+                "API: Payment not found"
+            );
             ApiError::NotFound("Payment not found".to_string())
         })?;
 
@@ -408,17 +427,29 @@ pub async fn api_cancel_payment(
     State(db_pool): State<SqlitePool>,
     Path(payment_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    debug!("API: Cancel Payment Request. PaymentID: {}", payment_id);
+    debug!(
+        payment_id = &*payment_id;
+        "API: Cancel Payment Request"
+    );
     let mut conn = db_pool.acquire().await?;
 
     match Payment::cancel_single_payment(&mut conn, &payment_id).await {
         Ok(status) => {
-            info!(target: "audit", "Payment Cancelled. PaymentID: {}, NewStatus: {:?}", payment_id, status);
+            info!(
+                target: "audit",
+                payment_id = &*payment_id,
+                new_status = &*status.to_string();
+                "Payment Cancelled"
+            );
             Ok((StatusCode::OK, Json(PaymentCancelResponse { payment_id, status })))
         },
         Err(e) => {
             let err_msg = e.to_string();
-            warn!("API: Failed to cancel payment {}. Reason: {}", payment_id, err_msg);
+            warn!(
+                payment_id = &*payment_id,
+                reason = &*err_msg;
+                "API: Failed to cancel payment"
+            );
             if err_msg.contains("Payment not found") {
                 Err(ApiError::NotFound(err_msg))
             } else {
