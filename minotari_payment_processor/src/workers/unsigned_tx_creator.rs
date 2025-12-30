@@ -368,9 +368,9 @@ async fn create_self_spend_step(
 
     if calculated_fee >= total_input_value {
         return Err(anyhow!(
-            "Input value {:?} is too small to cover fees {:?}",
-            mask_amount(total_input_value.as_u64() as i64),
-            mask_amount(calculated_fee.as_u64() as i64)
+            "Input value {} is too small to cover fees {}",
+            total_input_value,
+            calculated_fee
         ));
     }
 
