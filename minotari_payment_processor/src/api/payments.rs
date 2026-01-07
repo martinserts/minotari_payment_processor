@@ -129,7 +129,7 @@ pub async fn api_create_payment(
 ) -> Result<impl IntoResponse, ApiError> {
     debug!(
         client_id = &*request.client_id,
-        account = &*request.account_name,
+        account = &*mask_string(&request.account_name),
         recipient = &*mask_string(&request.recipient_address),
         amount = &*mask_amount(request.amount);
         "API: Create Payment Request"
@@ -137,7 +137,7 @@ pub async fn api_create_payment(
 
     if !state.env.accounts.contains_key(&request.account_name.to_lowercase()) {
         warn!(
-            account = &*request.account_name;
+            account = &*mask_string(&request.account_name);
             "API: Account not found in configuration"
         );
         return Err(ApiError::BadRequest(format!(
@@ -188,7 +188,7 @@ pub async fn api_create_payment(
         target: "audit",
         payment_id = &*new_payment.id,
         client_id = &*new_payment.client_id,
-        account = &*new_payment.account_name,
+        account = &*mask_string(&new_payment.account_name),
         recipient = &*mask_string(&new_payment.recipient_address);
         "Payment Created"
     );
@@ -212,14 +212,14 @@ pub async fn api_create_payment_batch(
     Json(request): Json<BulkPaymentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     debug!(
-        account = &*request.account_name,
+        account = &*mask_string(&request.account_name),
         item_count = request.items.len();
         "API: Create Bulk Payment Batch"
     );
 
     if !state.env.accounts.contains_key(&request.account_name.to_lowercase()) {
         warn!(
-            account = &*request.account_name;
+            account = &*mask_string(&request.account_name);
             "API: Account not found in configuration"
         );
         return Err(ApiError::BadRequest(format!(
@@ -230,7 +230,7 @@ pub async fn api_create_payment_batch(
 
     if request.items.is_empty() {
         warn!(
-            account = &*request.account_name;
+            account = &*mask_string(&request.account_name);
             "API: Empty batch request"
         );
         return Err(ApiError::BadRequest("Batch cannot be empty".to_string()));
@@ -240,7 +240,7 @@ pub async fn api_create_payment_batch(
         warn!(
             count = request.items.len(),
             limit = MAX_BATCH_SIZE,
-            account = &*request.account_name;
+            account = &*mask_string(&request.account_name);
             "API: Batch size exceeds limit"
         );
         return Err(ApiError::BadRequest(format!(
@@ -297,7 +297,7 @@ pub async fn api_create_payment_batch(
             return Ok((StatusCode::OK, Json(response)));
         } else {
             warn!(
-                account = &*request.account_name;
+                account = &*mask_string(&request.account_name);
                 "API: Duplicate payments found for account, but inconsistent batch state."
             );
             return Err(ApiError::BadRequest(
@@ -308,7 +308,7 @@ pub async fn api_create_payment_batch(
 
     if !existing_payments.is_empty() {
         warn!(
-            account = &*request.account_name,
+            account = &*mask_string(&request.account_name),
             existing_count = existing_payments.len(),
             request_count = request.items.len();
             "API: Partial duplicate batch request"
@@ -360,7 +360,7 @@ pub async fn api_create_payment_batch(
     info!(
         target: "audit",
         batch_id = &*batch.id,
-        account = &*batch.account_name,
+        account = &*mask_string(&batch.account_name),
         item_count = response_payments.len();
         "Batch Created"
     );

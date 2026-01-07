@@ -74,7 +74,7 @@ impl Payment {
     ) -> Result<Self, sqlx::Error> {
         debug!(
             client_id = client_id,
-            account = account_name,
+            account = &*mask_string(account_name),
             amount = &*mask_amount(amount);
             "DB: Creating Payment"
         );

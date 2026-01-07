@@ -28,7 +28,7 @@ use tokio::time::{self, Duration};
 use crate::config::PaymentReceiverAccount;
 use crate::db::payment::Payment;
 use crate::db::payment_batch::{BatchPayload, PaymentBatch, PaymentBatchStatus, StepPayload, TransactionStep};
-use crate::utils::log::mask_amount;
+use crate::utils::log::{mask_amount, mask_string};
 use crate::workers::types::IntermediateContext;
 
 const DEFAULT_SLEEP_SECS: u64 = 15;
@@ -181,7 +181,7 @@ async fn process_single_batch(
         if balance < amount_to_lock {
             warn!(
                 batch_id = batch_id.as_str(),
-                account = account_name.as_str(),
+                account = &*mask_string(account_name.as_str()),
                 requested = &*mask_amount(amount_to_lock),
                 actual = &*mask_amount(balance);
                 "Not enough funds in wallet"

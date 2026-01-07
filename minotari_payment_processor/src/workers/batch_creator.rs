@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::MAX_BATCH_SIZE;
 use crate::db::{payment::Payment, payment_batch::PaymentBatch};
+use crate::utils::log::mask_string;
 
 const DEFAULT_SLEEP_SECS: u64 = 10 * 60; // 10 minutes
 
@@ -67,14 +68,14 @@ async fn process_payment_cycle(db_pool: &SqlitePool) -> Result<bool, anyhow::Err
 
     for (account_name, account_payments) in payments_by_account {
         info!(
-            account = &*account_name,
+            account = &*mask_string(&account_name),
             count = account_payments.len();
             "Processing group for account"
         );
 
         if let Err(e) = process_account_batch(db_pool, &account_name, &account_payments).await {
             error!(
-                account = &*account_name,
+                account = &*mask_string(&account_name),
                 error:? = e;
                 "Failed to create batch for account"
             );
@@ -97,7 +98,7 @@ async fn process_account_batch(
     let pr_idempotency_key = Uuid::new_v4().to_string();
 
     info!(
-        account = account_name,
+        account = &*mask_string(account_name),
         idempotency_key = &*pr_idempotency_key,
         payment_count = payments.len();
         "Creating batch for Account"
@@ -114,7 +115,7 @@ async fn process_account_batch(
     info!(
         target: "audit",
         batch_id = &*batch.id,
-        account = account_name,
+        account = &*mask_string(account_name),
         count = payments.len();
         "Batch Created Successfully"
     );

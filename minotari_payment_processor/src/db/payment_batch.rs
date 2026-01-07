@@ -8,7 +8,10 @@ use tari_common_types::transaction::TxId;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::db::payment::{Payment, PaymentStatus};
+use crate::{
+    db::payment::{Payment, PaymentStatus},
+    utils::log::mask_string,
+};
 
 const MAX_RETRIES: i64 = 10;
 
@@ -161,7 +164,7 @@ impl PaymentBatch {
         payment_ids: &[String],
     ) -> Result<Self, sqlx::Error> {
         debug!(
-            account = account_name;
+            account = &*mask_string(account_name);
             "DB: Creating new payment batch"
         );
         let mut tx = pool.begin().await?;
